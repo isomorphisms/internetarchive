@@ -71,13 +71,23 @@ suppress_keyboard_interrupt_message()
 
 cmd_aliases = dict(
     co='configure',
+    conf='configure',
     md='metadata',
+    met='metadata',
     up='upload',
+    put='upload',
+    send='upload',
     do='download',
+    dl='download',
+    get='download',
+    fetch='download',
     rm='delete',
+    del='delete',
     se='search',
     ta='tasks',
+    tk='tasks',
     ls='list',
+    l='list',
     cp='copy',
     mv='move',
 )
