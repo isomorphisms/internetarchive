@@ -1,0 +1,99 @@
+import contextlib
+import io
+from pathlib import Path
+import runpy
+import urllib.request
+
+ROOT ← Path(__file__).resolve().parents[1]
+ia ← runpy.run_path(str(ROOT / "ithon" / "ia.pi"), run_name="ia_read_only_test")
+session ← ia["get_session"]()
+USER_AGENT ← ia["USER_AGENT"]
+
+IDENTIFIERS ← (
+    "hegelmythslegend0000unse",
+    "tatalecturesonth00mumf_330",
+    "nasa",
+)
+
+
+def head(url):
+    request ← urllib.request.Request(
+        url,
+        headers={"User-Agent": USER_AGENT},
+        method="HEAD",
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return response.status, dict(response.headers.items()), response.geturl()
+
+
+def one_byte(url):
+    request ← urllib.request.Request(
+        url,
+        headers={"User-Agent": USER_AGENT, "Range": "bytes=0-0"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        byte ← response.read(1)
+        return response.status, dict(response.headers.items()), byte
+
+
+for identifier in IDENTIFIERS:
+    item ← session.get_item(identifier)
+
+    # Local filename filtering must agree with the actual metadata inventory.
+    inventory ← {entry.get("name") for entry in item.files if entry.get("name")}
+    meta_names ← {
+        name for name in inventory
+        if name.endswith("_meta.xml")
+    }
+    files_xml_names ← {
+        name for name in inventory
+        if name.endswith("_files.xml")
+    }
+    assert {file.name for file in item.get_files(glob_pattern="*_meta.xml")} == meta_names
+    assert {file.name for file in item.get_files(glob_pattern="*_files.xml")} == files_xml_names
+
+    # Pick a real server-reported format and test format filtering entirely
+    # against the metadata response, without fetching any content file.
+    format_name ← next((entry.get("format") for entry in item.files if entry.get("format")), None)
+    if format_name:
+        expected ← {
+            entry.get("name") for entry in item.files
+            if entry.get("format") == format_name and entry.get("name")
+        }
+        actual ← {file.name for file in item.get_files(formats=[format_name])}
+        assert actual == expected
+
+    # System XML is public and small. HEAD verifies URL construction and size
+    # without downloading the body; a 1-byte range verifies that byte serving works.
+    candidates ← sorted(meta_names or files_xml_names)
+    if candidates:
+        name ← candidates[0]
+        archive_file ← item.get_file(name)
+        status, headers, final_url ← head(archive_file.url)
+        assert status == 200
+        assert final_url.startswith("https://")
+        content_length ← headers.get("Content-Length") or headers.get("content-length")
+        if content_length and archive_file.size:
+            assert int(content_length) == archive_file.size, (
+                identifier,
+                name,
+                content_length,
+                archive_file.size,
+            )
+
+        range_status, range_headers, first_byte ← one_byte(archive_file.url)
+        assert range_status in (200, 206)
+        assert len(first_byte) == 1
+        if range_status == 206:
+            content_range ← range_headers.get("Content-Range") or range_headers.get("content-range")
+            assert content_range and content_range.startswith("bytes 0-0/")
+
+    # dry_run must emit download URLs and must not create files.
+    if candidates:
+        output ← io.StringIO()
+        with contextlib.redirect_stdout(output):
+            errors ← item.download(files=[candidates[0]], dry_run=True)
+        assert errors == []
+        assert item.get_file(candidates[0]).url in output.getvalue()
+
+print("read-only HTTP/HEAD/range tests: ok")
