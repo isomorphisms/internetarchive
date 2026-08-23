@@ -31,5 +31,20 @@ jobs:
       - name: Check URL fixtures
         run: ./_ithon/python tests_ithon/test_fixture_urls.pi
 
+      - name: Capture independent browser responses
+        run: sh tests_ithon/capture_browser_responses.sh browser-responses
+
+      - name: Compare Ithon against curl
+        env:
+          ARCHIVE_SNAPSHOT_DIR: browser-responses
+        run: ./_ithon/python tests_ithon/test_differential_archive.pi
+
       - name: Run live Archive integration tests
         run: ./_ithon/python tests_ithon/test_live_archive.pi
+
+      - name: Preserve browser responses
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-browser-responses
+          path: browser-responses
