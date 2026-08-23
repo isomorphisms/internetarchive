@@ -367,7 +367,7 @@ class Item:
     def load(self):
         self.metadata ← self.item_metadata.get("metadata", {})
         self.files ← self.item_metadata.get("files", [])
-        self.exists ← bool(self.metadata)
+        self.exists ← bool(self.item_metadata)
         self.is_dark ← self.item_metadata.get("is_dark")
         self.server ← self.item_metadata.get("server")
         self.item_size ← sum(int(entry.get("size") or 0) for entry in self.files)

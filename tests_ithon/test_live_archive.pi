@@ -33,6 +33,7 @@ for case in cases["items"]:
 
     if state == "dark":
         assert bool(item.item_metadata.get("is_dark")), (identifier, item.item_metadata)
+        assert item.exists, (identifier, item.item_metadata)
         assert item.metadata == {}, (identifier, item.metadata)
         assert item.files == [], (identifier, item.files)
         exact_search ← list(session.search_items(
