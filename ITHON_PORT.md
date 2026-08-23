@@ -2,6 +2,8 @@
 
 Branch: `ithon-rewrite`
 
+Project grouping: **Rusty Bike Shed**.
+
 Compatibility target: `isomorphisms/internetarchive` master at `87499c472123bb66cdd5787dba66885e055bf4e5` (`internetarchive` 1.8.2.dev1), the snapshot already present in this fork.
 
 ## Shape
