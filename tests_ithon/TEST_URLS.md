@@ -4,11 +4,11 @@ These are intentionally concrete fixtures instead of random public items.
 
 ## Hegel: Myths and Legends
 
-Recovered from the user's existing Hegel material/history.
+Internet Archive edition of the Hegel book the user supplied and is actively using.
 
-- Details: `https://archive.org/details/hegelmythslegendOOOOunse`
-- Metadata: `https://archive.org/metadata/hegelmythslegendOOOOunse`
-- Identifier: `hegelmythslegendOOOOunse`
+- Details: `https://archive.org/details/hegelmythslegend0000unse`
+- Metadata: `https://archive.org/metadata/hegelmythslegend0000unse`
+- Identifier: `hegelmythslegend0000unse`
 
 Live assertions:
 
