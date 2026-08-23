@@ -49,9 +49,29 @@ capture_item() {
         > "$OUT/$id.range.status"
 }
 
+capture_search_page() {
+    page=$1
+    curl --silent --show-error --location \
+        --user-agent "$BROWSER_UA" \
+        --get 'https://archive.org/advancedsearch.php' \
+        --data-urlencode 'q=Hegel' \
+        --data-urlencode 'fl[]=identifier' \
+        --data-urlencode 'fl[]=title' \
+        --data-urlencode 'sort[]=identifier asc' \
+        --data-urlencode 'rows=2' \
+        --data-urlencode "page=$page" \
+        --data-urlencode 'output=json' \
+        --output "$OUT/hegel.page${page}.search.json" \
+        --write-out '%{http_code}\n' \
+        > "$OUT/hegel.page${page}.search.status"
+}
+
 capture_item hegelmythslegend0000unse
 capture_item tatalecturesonth00mumf_330
 capture_item nasa
+
+capture_search_page 1
+capture_search_page 2
 
 curl --silent --show-error --location \
     --user-agent "$BROWSER_UA" \
