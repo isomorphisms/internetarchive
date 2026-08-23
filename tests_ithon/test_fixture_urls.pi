@@ -1,0 +1,34 @@
+import json
+from pathlib import Path
+import urllib.parse
+
+ROOT ← Path(__file__).resolve().parents[1]
+FIXTURES ← ROOT / "tests_ithon" / "fixtures" / "archive_urls.json"
+cases ← json.loads(FIXTURES.read_text(encoding="utf-8"))
+
+assert len(cases["items"]) >= 2
+
+for case in cases["items"]:
+    identifier ← case["identifier"]
+
+    details ← urllib.parse.urlparse(case["details_url"])
+    assert details.scheme == "https"
+    assert details.netloc == "archive.org"
+    assert details.path == f"/details/{identifier}"
+
+    metadata ← urllib.parse.urlparse(case["metadata_url"])
+    assert metadata.scheme == "https"
+    assert metadata.netloc == "archive.org"
+    assert metadata.path == f"/metadata/{identifier}"
+
+for case in cases["searches"]:
+    parsed ← urllib.parse.urlparse(case["url"])
+    params ← urllib.parse.parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "archive.org"
+    assert parsed.path == "/advancedsearch.php"
+    assert params["q"] == [case["query"]]
+    assert params["output"] == ["json"]
+    assert "identifier" in params["fl[]"]
+
+print("archive URL fixtures: ok")
