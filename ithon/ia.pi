@@ -1,0 +1,909 @@
+#!/usr/bin/env ithon
+"""
+Ithon rewrite of the Internet Archive command-line/client surface.
+
+Compatibility target: isomorphisms/internetarchive master at
+87499c472123bb66cdd5787dba66885e055bf4e5 (internetarchive 1.8.2.dev1).
+
+This file deliberately uses only the Ithon/Python standard library.
+"""
+
+import argparse
+import configparser
+import fnmatch
+import getpass
+import hashlib
+import http.client
+import http.cookiejar
+import json
+import os
+from pathlib import Path
+import shutil
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+VERSION ← "0.1.0"
+ARCHIVE_HOST ← "archive.org"
+S3_HOST ← "s3.us.archive.org"
+CATALOG_HOST ← "catalogd.archive.org"
+USER_AGENT ← f"ithon-internetarchive/{VERSION}"
+
+
+class ArchiveError(Exception):
+    pass
+
+
+def config_path(path=None):
+    if path:
+        return Path(path).expanduser()
+    config_dir ← Path.home() / ".config"
+    if config_dir.is_dir():
+        return config_dir / "ia.ini"
+    return Path.home() / ".ia"
+
+
+def load_config(path=None):
+    parser ← configparser.RawConfigParser()
+    resolved ← config_path(path)
+    if resolved.is_file():
+        parser.read(resolved)
+
+    config ← {
+        "s3": {
+            "access": parser.get("s3", "access", fallback=None),
+            "secret": parser.get("s3", "secret", fallback=None),
+        },
+        "cookies": {
+            "logged-in-user": parser.get("cookies", "logged-in-user", fallback=None),
+            "logged-in-sig": parser.get("cookies", "logged-in-sig", fallback=None),
+        },
+        "general": {
+            "screenname": parser.get("general", "screenname", fallback=None),
+            "secure": parser.getboolean("general", "secure", fallback=True),
+        },
+    }
+    return config
+
+
+def save_config(config, path=None):
+    resolved ← config_path(path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    parser ← configparser.RawConfigParser()
+    for section in ("s3", "cookies", "general"):
+        parser.add_section(section)
+        for key, value in config.get(section, {}).items():
+            if value is not None:
+                parser.set(section, key, str(value))
+    with resolved.open("w", encoding="utf-8") as stream:
+        parser.write(stream)
+    os.chmod(resolved, 0o600)
+    return resolved
+
+
+def low_auth(access, secret):
+    if not access or not secret:
+        raise ArchiveError("IA-S3 credentials are required; run `ia-ithon configure`.")
+    return f"LOW {access}:{secret}"
+
+
+def cookie_header(config):
+    cookies ← config.get("cookies", {})
+    values ← []
+    for name in ("logged-in-user", "logged-in-sig"):
+        value ← cookies.get(name)
+        if value:
+            values.append(f"{name}={value}")
+    return "; ".join(values)
+
+
+def build_url(host, path, query=None, secure=True):
+    scheme ← "https" if secure else "http"
+    url ← f"{scheme}://{host}{path}"
+    if query:
+        url += "?" + urllib.parse.urlencode(query, doseq=True)
+    return url
+
+
+def request_bytes(method, url, data=None, headers=None, timeout=30):
+    final_headers ← {"User-Agent": USER_AGENT, "Connection": "close"}
+    final_headers.update(headers or {})
+    if isinstance(data, dict):
+        data ← urllib.parse.urlencode(data, doseq=True).encode()
+        final_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+    request ← urllib.request.Request(url, data=data, headers=final_headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body ← response.read()
+            return response.status, dict(response.headers.items()), body
+    except urllib.error.HTTPError as exc:
+        body ← exc.read()
+        text ← body.decode("utf-8", "replace")
+        raise ArchiveError(f"{method} {url}: HTTP {exc.code}: {text[:500]}") from exc
+    except urllib.error.URLError as exc:
+        raise ArchiveError(f"{method} {url}: {exc.reason}") from exc
+
+
+def request_json(method, url, data=None, headers=None, timeout=30):
+    _, _, body ← request_bytes(method, url, data, headers, timeout)
+    try:
+        return json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ArchiveError(f"{url}: response was not valid JSON") from exc
+
+
+def md5_file(path):
+    digest ← hashlib.md5()
+    with open(path, "rb") as stream:
+        for chunk in iter(λ: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def parse_key_value(values):
+    result ← {}
+    for value in values or []:
+        if ":" not in value:
+            raise ArchiveError(f"expected KEY:VALUE, got {value!r}")
+        key, item ← value.split(":", 1)
+        result[key] ← item
+    return result
+
+
+def json_pointer_component(value):
+    return str(value).replace("~", "~0").replace("/", "~1")
+
+
+def prepare_metadata(metadata, source=None, append=False, append_list=False):
+    source ← {} if source is None else json.loads(json.dumps(source))
+    prepared ← {}
+
+    for raw_key, raw_value in metadata.items():
+        value ← str(raw_value) if isinstance(raw_value, (int, float, complex)) else raw_value
+        if "[" in raw_key and raw_key.endswith("]"):
+            key, _, raw_index ← raw_key[:-1].partition("[")
+            try:
+                index ← int(raw_index)
+            except ValueError:
+                key ← raw_key
+                index ← None
+            if index is not None:
+                values ← prepared.setdefault(key, source.get(key, []))
+                if not isinstance(values, list):
+                    values ← [values]
+                    prepared[key] ← values
+                while len(values) <= index:
+                    values.append(None)
+                values[index] ← value
+                continue
+
+        key ← raw_key
+        if append_list and key in source:
+            existing ← source[key] if isinstance(source[key], list) else [source[key]]
+            incoming ← value if isinstance(value, list) else [value]
+            prepared[key] ← existing + [item for item in incoming if item not in existing]
+        elif append and key in source:
+            prepared[key] ← f"{source[key]} {value}"
+        else:
+            prepared[key] ← value
+
+    for key, value in list(prepared.items()):
+        if isinstance(value, list):
+            prepared[key] ← [item for item in value if item is not None and item != "REMOVE_TAG"]
+    return prepared
+
+
+def top_level_patch(source, destination):
+    patch ← []
+    for key in source:
+        if key not in destination:
+            patch.append({"op": "remove", "path": "/" + json_pointer_component(key)})
+    for key, value in destination.items():
+        path ← "/" + json_pointer_component(key)
+        if key not in source:
+            patch.append({"op": "add", "path": path, "value": value})
+        elif source[key] != value:
+            patch.append({"op": "replace", "path": path, "value": value})
+    return patch
+
+
+def metadata_headers(metadata, queue_derive=True):
+    values ← dict(metadata or {})
+    values.setdefault("scanner", f"Ithon Internet Archive library {VERSION}")
+    headers ← {
+        "x-archive-auto-make-bucket": "1",
+        "x-archive-queue-derive": "1" if queue_derive else "0",
+    }
+    for key, value in values.items():
+        items ← value if isinstance(value, (list, tuple)) else [value]
+        for index, item in enumerate(items):
+            if item is None or item == "":
+                continue
+            if isinstance(item, dict):
+                item ← json.dumps(item, separators=(",", ":"))
+            text ← str(item)
+            if any(ord(character) < 32 or ord(character) > 126 for character in text) or " " in text:
+                text ← "uri(" + urllib.parse.quote(text) + ")"
+            header_key ← f"x-archive-meta{index:02d}-{key}".replace("_", "--")
+            headers[header_key] ← text
+    return headers
+
+
+def s3_request(method, remote_path, access, secret, headers=None, file_path=None, timeout=120):
+    request_headers ← {
+        "User-Agent": USER_AGENT,
+        "Authorization": low_auth(access, secret),
+        "Connection": "close",
+    }
+    request_headers.update(headers or {})
+    connection ← http.client.HTTPSConnection(S3_HOST, timeout=timeout)
+    try:
+        connection.putrequest(method, remote_path)
+        if file_path is not None:
+            size ← os.path.getsize(file_path)
+            request_headers.setdefault("Content-Length", str(size))
+        else:
+            request_headers.setdefault("Content-Length", "0")
+        for key, value in request_headers.items():
+            connection.putheader(key, str(value))
+        connection.endheaders()
+        if file_path is not None:
+            with open(file_path, "rb") as stream:
+                while True:
+                    chunk ← stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    connection.send(chunk)
+        response ← connection.getresponse()
+        body ← response.read()
+        if response.status >= 400:
+            text ← body.decode("utf-8", "replace")
+            raise ArchiveError(f"{method} https://{S3_HOST}{remote_path}: HTTP {response.status}: {text[:500]}")
+        return response.status, dict(response.getheaders()), body
+    finally:
+        connection.close()
+
+
+class ArchiveSession:
+    def __init__(self, config=None, config_file=None):
+        self.config_file ← config_file
+        self.config ← load_config(config_file)
+        if config:
+            for section, values in config.items():
+                self.config.setdefault(section, {}).update(values)
+        self.secure ← self.config.get("general", {}).get("secure", True)
+        self.access_key ← self.config.get("s3", {}).get("access")
+        self.secret_key ← self.config.get("s3", {}).get("secret")
+
+    def get_metadata(self, identifier):
+        identifier ← urllib.parse.quote(identifier, safe="")
+        return request_json("GET", build_url(ARCHIVE_HOST, f"/metadata/{identifier}", secure=self.secure))
+
+    def get_item(self, identifier, item_metadata=None):
+        return Item(self, identifier, item_metadata)
+
+    def search_items(self, query, fields=None, sorts=None, params=None):
+        return Search(self, query, fields, sorts, params)
+
+    def get_tasks(self, identifier=None, task_id=None, task_type=None, params=None, verbose=True):
+        tasks ← Catalog(self, identifier, task_id, params, verbose).tasks
+        if task_type is None:
+            return tasks
+        row_types ← {"green": 0, "blue": 1, "red": 2, "brown": 9, "purple": -1}
+        if task_type not in row_types:
+            raise ArchiveError(f"unknown task type: {task_type}")
+        return [task for task in tasks if task.row_type == row_types[task_type]]
+
+
+class ArchiveFile:
+    def __init__(self, item, name, file_metadata=None):
+        self.item ← item
+        self.identifier ← item.identifier
+        self.name ← name.strip("/")
+        metadata ← file_metadata or next(
+            (entry for entry in item.files if entry.get("name") == self.name),
+            {},
+        )
+        self.file_metadata ← metadata
+        self.exists ← bool(metadata)
+        self.size ← int(metadata.get("size") or 0)
+        self.mtime ← float(metadata.get("mtime") or 0)
+        self.format ← metadata.get("format")
+        self.md5 ← metadata.get("md5")
+        self.source ← metadata.get("source")
+        quoted ← urllib.parse.quote(self.name)
+        self.url ← build_url(ARCHIVE_HOST, f"/download/{urllib.parse.quote(self.identifier)}/{quoted}")
+
+    def download(self, file_path=None, destdir=None, ignore_existing=False, checksum=False,
+                 no_change_timestamp=False):
+        path ← Path(file_path or self.name)
+        if destdir:
+            path ← Path(destdir) / path
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        if path.exists():
+            if ignore_existing:
+                return None
+            if checksum and self.md5 and md5_file(path) == self.md5:
+                return None
+            stat ← path.stat()
+            if self.size and stat.st_size == self.size and self.mtime and stat.st_mtime == self.mtime:
+                return None
+
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(self.url, headers={"User-Agent": USER_AGENT}),
+                timeout=30,
+            ) as response, path.open("wb") as output:
+                shutil.copyfileobj(response, output, length=1024 * 1024)
+        except Exception:
+            if path.exists():
+                path.unlink()
+            raise
+
+        if self.mtime and not no_change_timestamp:
+            os.utime(path, (0, self.mtime))
+        return path
+
+    def delete(self, cascade_delete=False, access_key=None, secret_key=None, headers=None):
+        access ← access_key or self.item.session.access_key
+        secret ← secret_key or self.item.session.secret_key
+        request_headers ← dict(headers or {})
+        request_headers.setdefault("x-archive-cascade-delete", "1" if cascade_delete else "0")
+        remote ← "/" + urllib.parse.quote(self.identifier) + "/" + urllib.parse.quote(self.name)
+        return s3_request("DELETE", remote, access, secret, request_headers)
+
+
+class Item:
+    def __init__(self, session, identifier, item_metadata=None):
+        self.session ← session
+        self.identifier ← identifier
+        self.item_metadata ← item_metadata if item_metadata is not None else session.get_metadata(identifier)
+        self.load()
+
+    def load(self):
+        self.metadata ← self.item_metadata.get("metadata", {})
+        self.files ← self.item_metadata.get("files", [])
+        self.exists ← bool(self.metadata)
+        self.is_dark ← self.item_metadata.get("is_dark")
+        self.server ← self.item_metadata.get("server")
+        self.item_size ← sum(int(entry.get("size") or 0) for entry in self.files)
+
+    def refresh(self):
+        self.item_metadata ← self.session.get_metadata(self.identifier)
+        self.load()
+        return self
+
+    def get_file(self, name, file_metadata=None):
+        return ArchiveFile(self, name, file_metadata)
+
+    def get_files(self, files=None, formats=None, glob_pattern=None, on_the_fly=False):
+        names ← set(files if isinstance(files, (list, tuple, set)) else ([files] if files else []))
+        wanted_formats ← set(formats if isinstance(formats, (list, tuple, set)) else ([formats] if formats else []))
+        entries ← list(self.files)
+        if on_the_fly:
+            entries.extend({"name": name, "otf": True} for name in (
+                f"{self.identifier}.epub",
+                f"{self.identifier}.mobi",
+                f"{self.identifier}_daisy.zip",
+                f"{self.identifier}_archive_marc.xml",
+            ))
+        patterns ← glob_pattern if isinstance(glob_pattern, list) else (
+            glob_pattern.split("|") if glob_pattern else []
+        )
+        for entry in entries:
+            name ← entry.get("name", "")
+            matches ← not names and not wanted_formats and not patterns
+            matches ← matches or name in names
+            matches ← matches or entry.get("format") in wanted_formats
+            matches ← matches or any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+            if matches:
+                yield self.get_file(name, entry)
+
+    def download(self, files=None, formats=None, glob_pattern=None, dry_run=False,
+                 ignore_existing=False, checksum=False, destdir=None, no_directory=False,
+                 on_the_fly=False, no_change_timestamp=False):
+        errors ← []
+        selected ← list(self.get_files(files, formats, glob_pattern, on_the_fly))
+        for archive_file in selected:
+            if dry_run:
+                print(archive_file.url)
+                continue
+            relative ← Path(archive_file.name) if no_directory else Path(self.identifier) / archive_file.name
+            try:
+                archive_file.download(relative, destdir, ignore_existing, checksum, no_change_timestamp)
+            except Exception as exc:
+                errors.append((archive_file.name, str(exc)))
+        return errors
+
+    def modify_metadata(self, metadata, target="metadata", append=False, append_list=False,
+                        priority=-5, access_key=None, secret_key=None):
+        access ← access_key or self.session.access_key
+        secret ← secret_key or self.session.secret_key
+        source ← self.item_metadata.get(target.split("/")[0], {})
+        if target.startswith("files/"):
+            filename ← target.split("/", 1)[1]
+            source ← next((entry for entry in self.files if entry.get("name") == filename), {})
+        destination ← dict(source)
+        prepared ← prepare_metadata(metadata, source, append, append_list)
+        destination.update(prepared)
+        destination ← {key: value for key, value in destination.items() if value != "REMOVE_TAG"}
+        patch ← top_level_patch(source, destination)
+        form ← {
+            "-patch": json.dumps(patch, separators=(",", ":")),
+            "-target": target,
+            "priority": priority,
+            "access": access,
+            "secret": secret,
+        }
+        url ← build_url(ARCHIVE_HOST, f"/metadata/{urllib.parse.quote(self.identifier)}")
+        result ← request_json("POST", url, data=form)
+        self.refresh()
+        return result
+
+    def upload_file(self, body, key=None, metadata=None, headers=None, access_key=None,
+                    secret_key=None, queue_derive=True, verify=True, checksum=False,
+                    delete=False, retries=0, retries_sleep=30):
+        path ← Path(body)
+        remote_name ← key or path.name
+        access ← access_key or self.session.access_key
+        secret ← secret_key or self.session.secret_key
+
+        if checksum:
+            existing ← self.get_file(remote_name)
+            digest ← md5_file(path)
+            if existing.exists and existing.md5 == digest:
+                if delete:
+                    path.unlink()
+                return 304, {}, b""
+
+        request_headers ← metadata_headers(metadata, queue_derive)
+        request_headers.update(headers or {})
+        request_headers.setdefault("x-archive-size-hint", str(path.stat().st_size))
+        if verify or delete:
+            request_headers["Content-MD5"] ← md5_file(path)
+
+        remote ← "/" + urllib.parse.quote(self.identifier) + "/" + urllib.parse.quote(remote_name)
+        attempts ← retries + 1
+        while attempts:
+            attempts -= 1
+            try:
+                result ← s3_request("PUT", remote, access, secret, request_headers, path)
+                if delete and result[0] == 200:
+                    path.unlink()
+                self.refresh()
+                return result
+            except ArchiveError as exc:
+                if attempts == 0 or "HTTP 503" not in str(exc):
+                    raise
+                time.sleep(retries_sleep)
+
+    def upload(self, files, **kwargs):
+        values ← files if isinstance(files, (list, tuple, set)) else [files]
+        return [self.upload_file(value, **kwargs) for value in values]
+
+
+class Search:
+    def __init__(self, session, query, fields=None, sorts=None, params=None):
+        self.session ← session
+        self.query ← query
+        self.fields ← list(fields or ["identifier"])
+        self.sorts ← list(sorts or [])
+        self.params ← dict(params or {})
+        self.rows ← int(self.params.pop("rows", 50))
+
+    def _page(self, page):
+        query ← [("q", self.query), ("rows", self.rows), ("page", page), ("output", "json")]
+        query.extend(("fl[]", field) for field in self.fields)
+        query.extend(("sort[]", sort) for sort in self.sorts)
+        query.extend(self.params.items())
+        url ← build_url(ARCHIVE_HOST, "/advancedsearch.php", query, self.session.secure)
+        return request_json("GET", url)
+
+    def __iter__(self):
+        page ← 1
+        while True:
+            result ← self._page(page)
+            response ← result.get("response", {})
+            documents ← response.get("docs", [])
+            for document in documents:
+                yield document
+            start ← int(response.get("start", 0))
+            total ← int(response.get("numFound", 0))
+            if not documents or start + len(documents) >= total:
+                break
+            page += 1
+
+
+class CatalogTask:
+    COLUMNS ← ("identifier", "server", "command", "time", "submitter", "args", "task_id", "row_type")
+
+    def __init__(self, columns):
+        for key, value in zip(self.COLUMNS, columns):
+            setattr(self, key, value)
+        if isinstance(getattr(self, "args", None), str):
+            self.args ← dict(urllib.parse.parse_qsl(self.args))
+
+    def __repr__(self):
+        return (
+            f"CatalogTask(identifier={getattr(self, 'identifier', None)!r}, "
+            f"task_id={getattr(self, 'task_id', None)!r}, "
+            f"server={getattr(self, 'server', None)!r}, "
+            f"command={getattr(self, 'command', None)!r}, "
+            f"row_type={getattr(self, 'row_type', None)!r})"
+        )
+
+
+class Catalog:
+    def __init__(self, session, identifier=None, task_id=None, params=None, verbose=True):
+        self.session ← session
+        query ← {"json": 2, "output": "json", "callback": "foo"}
+        query.update(params or {})
+        if not identifier and not task_id and not params:
+            query["justme"] ← 1
+        if task_id:
+            query.update({"search_task_id": str(task_id), "history": 999999999999999999999})
+        if identifier:
+            path ← f"/history/{urllib.parse.quote(identifier)}"
+            host ← ARCHIVE_HOST
+        elif task_id:
+            path ← "/catalog.php"
+            host ← CATALOG_HOST
+        else:
+            path ← "/catalog.php"
+            host ← ARCHIVE_HOST
+        headers ← {}
+        cookie ← cookie_header(session.config)
+        if not cookie:
+            raise ArchiveError("logged-in cookies are required; run `ia-ithon configure`.")
+        headers["Cookie"] ← cookie + f"; verbose={'1' if verbose else '0'}"
+        _, _, body ← request_bytes("GET", build_url(host, path, query, session.secure), headers=headers)
+        text ← body.decode("utf-8", "replace")
+        if "(" in text and ")" in text:
+            text ← text[text.index("(") + 1:text.rindex(")")]
+        try:
+            rows ← json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ArchiveError("unable to parse catalog response") from exc
+        self.tasks ← [CatalogTask(row) for row in rows]
+
+
+def get_session(config=None, config_file=None):
+    return ArchiveSession(config, config_file)
+
+
+def get_item(identifier, archive_session=None, **kwargs):
+    session ← archive_session or get_session(kwargs.get("config"), kwargs.get("config_file"))
+    return session.get_item(identifier)
+
+
+def get_files(identifier, files=None, formats=None, glob_pattern=None, on_the_fly=False, **kwargs):
+    return get_item(identifier, **kwargs).get_files(files, formats, glob_pattern, on_the_fly)
+
+
+def search_items(query, fields=None, sorts=None, params=None, archive_session=None, **kwargs):
+    session ← archive_session or get_session(kwargs.get("config"), kwargs.get("config_file"))
+    return session.search_items(query, fields, sorts, params)
+
+
+def download(identifier, **kwargs):
+    item_kwargs ← {}
+    for key in ("config", "config_file"):
+        if key in kwargs:
+            item_kwargs[key] ← kwargs.pop(key)
+    return get_item(identifier, **item_kwargs).download(**kwargs)
+
+
+def upload(identifier, files, **kwargs):
+    item_kwargs ← {}
+    for key in ("config", "config_file"):
+        if key in kwargs:
+            item_kwargs[key] ← kwargs.pop(key)
+    return get_item(identifier, **item_kwargs).upload(files, **kwargs)
+
+
+def modify_metadata(identifier, metadata, **kwargs):
+    item_kwargs ← {}
+    for key in ("config", "config_file"):
+        if key in kwargs:
+            item_kwargs[key] ← kwargs.pop(key)
+    return get_item(identifier, **item_kwargs).modify_metadata(metadata, **kwargs)
+
+
+def delete(identifier, files=None, formats=None, glob_pattern=None, **kwargs):
+    item ← get_item(identifier, config=kwargs.pop("config", None), config_file=kwargs.pop("config_file", None))
+    return [archive_file.delete(**kwargs) for archive_file in item.get_files(files, formats, glob_pattern)]
+
+
+def copy_remote(session, source, destination, metadata=None, headers=None):
+    if source == destination:
+        raise ArchiveError("source and destination cannot be the same")
+    source_identifier, source_name ← source.split("/", 1)
+    destination_identifier, destination_name ← destination.split("/", 1)
+    source_file ← session.get_item(source_identifier).get_file(source_name)
+    if not source_file.exists:
+        raise ArchiveError(f"source does not exist: {source}")
+    request_headers ← metadata_headers(metadata or {}, True)
+    request_headers.update(headers or {})
+    request_headers["x-amz-copy-source"] ← "/" + source
+    request_headers["x-amz-metadata-directive"] ← "COPY"
+    request_headers.setdefault("x-archive-keep-old-version", "1")
+    remote ← "/" + urllib.parse.quote(destination_identifier) + "/" + urllib.parse.quote(destination_name)
+    return s3_request("PUT", remote, session.access_key, session.secret_key, request_headers)
+
+
+def move_remote(session, source, destination, metadata=None, headers=None):
+    result ← copy_remote(session, source, destination, metadata, headers)
+    source_identifier, source_name ← source.split("/", 1)
+    source_file ← session.get_item(source_identifier).get_file(source_name)
+    source_file.delete(cascade_delete=True, headers=headers)
+    return result
+
+
+def configure(username=None, password=None, config_file=None):
+    username ← username or input("Email address: ")
+    password ← password or getpass.getpass("Password: ")
+    jar ← http.cookiejar.CookieJar()
+    opener ← urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    payload ← urllib.parse.urlencode({
+        "username": username,
+        "password": password,
+        "remember": "CHECKED",
+        "action": "login",
+    }).encode()
+    login ← urllib.request.Request(
+        build_url(ARCHIVE_HOST, "/account/login.php"),
+        data=payload,
+        headers={"User-Agent": USER_AGENT, "Cookie": "test-cookie=1"},
+        method="POST",
+    )
+    with opener.open(login, timeout=30):
+        pass
+    cookies ← {cookie.name: cookie.value for cookie in jar}
+    if "logged-in-sig" not in cookies:
+        raise ArchiveError("authentication failed")
+
+    with opener.open(build_url(ARCHIVE_HOST, "/account/s3.php", {"output_json": 1}), timeout=30) as response:
+        keys ← json.load(response).get("key", {})
+    access ← keys.get("s3accesskey")
+    secret ← keys.get("s3secretkey")
+    if not access or not secret:
+        raise ArchiveError("could not retrieve IA-S3 keys")
+
+    info ← request_json(
+        "GET",
+        build_url(S3_HOST, "/", {"check_auth": 1}),
+        headers={"Authorization": low_auth(access, secret)},
+    )
+    if info.get("error"):
+        raise ArchiveError(str(info["error"]))
+
+    config ← {
+        "s3": {"access": access, "secret": secret},
+        "cookies": {
+            "logged-in-user": cookies.get("logged-in-user"),
+            "logged-in-sig": cookies.get("logged-in-sig"),
+        },
+        "general": {"screenname": info.get("screenname") or info.get("username"), "secure": True},
+    }
+    return save_config(config, config_file)
+
+
+def get_user_info(access_key, secret_key):
+    result ← request_json(
+        "GET",
+        build_url(S3_HOST, "/", {"check_auth": 1}),
+        headers={"Authorization": low_auth(access_key, secret_key)},
+    )
+    if result.get("error"):
+        raise ArchiveError(str(result["error"]))
+    return result
+
+
+def get_username(access_key, secret_key):
+    return get_user_info(access_key, secret_key).get("username")
+
+
+def add_common_config_argument(parser):
+    parser.add_argument("--config", dest="config_file")
+
+
+def build_parser():
+    parser ← argparse.ArgumentParser(prog="ia-ithon")
+    parser.add_argument("--version", action="version", version=VERSION)
+    subparsers ← parser.add_subparsers(dest="command", required=True)
+
+    configure_parser ← subparsers.add_parser("configure")
+    add_common_config_argument(configure_parser)
+    configure_parser.add_argument("--email")
+    configure_parser.add_argument("--password")
+
+    search_parser ← subparsers.add_parser("search")
+    add_common_config_argument(search_parser)
+    search_parser.add_argument("query")
+    search_parser.add_argument("--field", action="append", default=[])
+    search_parser.add_argument("--sort", action="append", default=[])
+    search_parser.add_argument("--rows", type=int, default=50)
+    search_parser.add_argument("--json", action="store_true")
+
+    metadata_parser ← subparsers.add_parser("metadata")
+    add_common_config_argument(metadata_parser)
+    metadata_parser.add_argument("identifier")
+    metadata_parser.add_argument("--set", action="append", default=[])
+    metadata_parser.add_argument("--target", default="metadata")
+    metadata_parser.add_argument("--append", action="store_true")
+    metadata_parser.add_argument("--append-list", action="store_true")
+    metadata_parser.add_argument("--raw", action="store_true")
+
+    list_parser ← subparsers.add_parser("list")
+    add_common_config_argument(list_parser)
+    list_parser.add_argument("identifier")
+    list_parser.add_argument("--format", action="append", default=[])
+    list_parser.add_argument("--glob")
+    list_parser.add_argument("--json", action="store_true")
+
+    download_parser ← subparsers.add_parser("download")
+    add_common_config_argument(download_parser)
+    download_parser.add_argument("identifier")
+    download_parser.add_argument("files", nargs="*")
+    download_parser.add_argument("--format", action="append", default=[])
+    download_parser.add_argument("--glob")
+    download_parser.add_argument("--destdir")
+    download_parser.add_argument("--no-directory", action="store_true")
+    download_parser.add_argument("--ignore-existing", action="store_true")
+    download_parser.add_argument("--checksum", action="store_true")
+    download_parser.add_argument("--dry-run", action="store_true")
+    download_parser.add_argument("--on-the-fly", action="store_true")
+
+    upload_parser ← subparsers.add_parser("upload")
+    add_common_config_argument(upload_parser)
+    upload_parser.add_argument("identifier")
+    upload_parser.add_argument("files", nargs="+")
+    upload_parser.add_argument("--metadata", action="append", default=[])
+    upload_parser.add_argument("--header", action="append", default=[])
+    upload_parser.add_argument("--no-derive", action="store_true")
+    upload_parser.add_argument("--checksum", action="store_true")
+    upload_parser.add_argument("--delete", action="store_true")
+    upload_parser.add_argument("--retries", type=int, default=0)
+
+    delete_parser ← subparsers.add_parser("delete")
+    add_common_config_argument(delete_parser)
+    delete_parser.add_argument("identifier")
+    delete_parser.add_argument("files", nargs="*")
+    delete_parser.add_argument("--format", action="append", default=[])
+    delete_parser.add_argument("--glob")
+    delete_parser.add_argument("--cascade", action="store_true")
+
+    copy_parser ← subparsers.add_parser("copy")
+    add_common_config_argument(copy_parser)
+    copy_parser.add_argument("source")
+    copy_parser.add_argument("destination")
+    copy_parser.add_argument("--metadata", action="append", default=[])
+    copy_parser.add_argument("--header", action="append", default=[])
+
+    move_parser ← subparsers.add_parser("move")
+    add_common_config_argument(move_parser)
+    move_parser.add_argument("source")
+    move_parser.add_argument("destination")
+    move_parser.add_argument("--metadata", action="append", default=[])
+    move_parser.add_argument("--header", action="append", default=[])
+
+    tasks_parser ← subparsers.add_parser("tasks")
+    add_common_config_argument(tasks_parser)
+    tasks_parser.add_argument("--identifier")
+    tasks_parser.add_argument("--task-id")
+    tasks_parser.add_argument("--type", choices=("green", "blue", "red", "brown", "purple"))
+    tasks_parser.add_argument("--json", action="store_true")
+
+    return parser
+
+
+def main(argv=None):
+    args ← build_parser().parse_args(argv)
+
+    if args.command == "configure":
+        path ← configure(args.email, args.password, args.config_file)
+        print(path)
+        return 0
+
+    session ← get_session(config_file=args.config_file)
+
+    if args.command == "search":
+        fields ← args.field or ["identifier"]
+        results ← session.search_items(args.query, fields, args.sort, {"rows": args.rows})
+        for result in results:
+            print(json.dumps(result, ensure_ascii=False) if args.json else result.get("identifier", result))
+        return 0
+
+    if args.command == "metadata":
+        item ← session.get_item(args.identifier)
+        changes ← parse_key_value(args.set)
+        if changes:
+            result ← item.modify_metadata(changes, args.target, args.append, args.append_list)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        else:
+            value ← item.item_metadata if args.raw else item.metadata
+            print(json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True))
+        return 0
+
+    if args.command == "list":
+        item ← session.get_item(args.identifier)
+        files ← item.get_files(formats=args.format, glob_pattern=args.glob)
+        for archive_file in files:
+            if args.json:
+                print(json.dumps(archive_file.file_metadata, ensure_ascii=False))
+            else:
+                print(archive_file.name)
+        return 0
+
+    if args.command == "download":
+        item ← session.get_item(args.identifier)
+        errors ← item.download(
+            files=args.files,
+            formats=args.format,
+            glob_pattern=args.glob,
+            dry_run=args.dry_run,
+            ignore_existing=args.ignore_existing,
+            checksum=args.checksum,
+            destdir=args.destdir,
+            no_directory=args.no_directory,
+            on_the_fly=args.on_the_fly,
+        )
+        for name, error in errors:
+            print(f"{name}: {error}", file=sys.stderr)
+        return 1 if errors else 0
+
+    if args.command == "upload":
+        item ← session.get_item(args.identifier)
+        metadata ← parse_key_value(args.metadata)
+        headers ← parse_key_value(args.header)
+        for path in args.files:
+            status, _, _ ← item.upload_file(
+                path,
+                metadata=metadata,
+                headers=headers,
+                queue_derive=not args.no_derive,
+                checksum=args.checksum,
+                delete=args.delete,
+                retries=args.retries,
+            )
+            print(f"{path}: {status}")
+        return 0
+
+    if args.command == "delete":
+        item ← session.get_item(args.identifier)
+        selected ← item.get_files(args.files, args.format, args.glob)
+        for archive_file in selected:
+            status, _, _ ← archive_file.delete(args.cascade)
+            print(f"{archive_file.name}: {status}")
+        return 0
+
+    if args.command in ("copy", "move"):
+        metadata ← parse_key_value(args.metadata)
+        headers ← parse_key_value(args.header)
+        operation ← copy_remote if args.command == "copy" else move_remote
+        status, _, _ ← operation(session, args.source, args.destination, metadata, headers)
+        print(f"{args.command}: {status}")
+        return 0
+
+    if args.command == "tasks":
+        tasks ← session.get_tasks(args.identifier, args.task_id, args.type)
+        for task in tasks:
+            if args.json:
+                print(json.dumps({key: getattr(task, key, None) for key in task.COLUMNS}, ensure_ascii=False))
+            else:
+                print(task)
+        return 0
+
+    raise ArchiveError(f"unhandled command: {args.command}")
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except ArchiveError as exc:
+        print(f"ia-ithon: {exc}", file=sys.stderr)
+        raise SystemExit(2)
