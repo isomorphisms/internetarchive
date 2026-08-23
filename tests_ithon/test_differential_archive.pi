@@ -2,25 +2,16 @@ import json
 import os
 from pathlib import Path
 import runpy
+import urllib.error
 import urllib.request
 
 ROOT ← Path(__file__).resolve().parents[1]
+FIXTURES ← ROOT / "tests_ithon" / "fixtures" / "archive_urls.json"
 SNAPSHOT_DIR ← Path(os.environ.get("ARCHIVE_SNAPSHOT_DIR", "browser-responses"))
+cases ← json.loads(FIXTURES.read_text(encoding="utf-8"))
 ia ← runpy.run_path(str(ROOT / "ithon" / "ia.pi"), run_name="ia_differential_test")
 session ← ia["get_session"]()
 USER_AGENT ← ia["USER_AGENT"]
-
-ITEMS ← {
-    "hegelmythslegend0000unse": {
-        "title_contains": "Hegel",
-        "year": "1996",
-    },
-    "tatalecturesonth00mumf_330": {
-        "title_contains": "Tata",
-        "year": "1983",
-    },
-    "nasa": {},
-}
 
 STABLE_METADATA_KEYS ← (
     "identifier",
@@ -39,6 +30,10 @@ STABLE_METADATA_KEYS ← (
 
 def load_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_status(path):
+    return int(path.read_text(encoding="utf-8").strip())
 
 
 def normalized_files(entries):
@@ -66,41 +61,59 @@ def direct_range(url):
             "Range": "bytes=0-255",
         },
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        body ← response.read()
-        assert response.status in (200, 206)
-        assert body
-        return body
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status, response.read(256)
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read(256)
 
 
-for identifier, expected in ITEMS.items():
+for case in cases["items"]:
+    identifier ← case["identifier"]
+    state ← case.get("expected_state", "metadata")
+    curl_metadata_status ← load_status(SNAPSHOT_DIR / f"{identifier}.metadata.status")
+    curl_search_status ← load_status(SNAPSHOT_DIR / f"{identifier}.search.status")
+    curl_range_status ← load_status(SNAPSHOT_DIR / f"{identifier}.range.status")
+
+    assert curl_metadata_status == 200, (identifier, "metadata", curl_metadata_status)
+    assert curl_search_status == 200, (identifier, "search", curl_search_status)
+
     curl_metadata ← load_json(SNAPSHOT_DIR / f"{identifier}.metadata.json")
     item ← session.get_item(identifier)
 
-    # The Ithon client and curl must see the same stable metadata fields.
-    curl_core ← curl_metadata.get("metadata", {})
-    ithon_core ← item.metadata
-    for key in STABLE_METADATA_KEYS:
-        if key in curl_core or key in ithon_core:
-            assert ithon_core.get(key) == curl_core.get(key), (
-                identifier,
-                key,
-                ithon_core.get(key),
-                curl_core.get(key),
-            )
+    if state == "dark":
+        # A dark identifier is still a valid API response. Both independent
+        # clients must see the same state rather than treating 403 as a crash.
+        assert bool(curl_metadata.get("is_dark")), (identifier, curl_metadata)
+        assert bool(item.item_metadata.get("is_dark")), (identifier, item.item_metadata)
+        assert curl_metadata.get("metadata") in (None, {})
+        assert item.metadata == {}
+        assert curl_metadata.get("files", []) == []
+        assert item.files == []
+    else:
+        curl_core ← curl_metadata.get("metadata", {})
+        ithon_core ← item.metadata
+        for key in STABLE_METADATA_KEYS:
+            if key in curl_core or key in ithon_core:
+                assert ithon_core.get(key) == curl_core.get(key), (
+                    identifier,
+                    key,
+                    ithon_core.get(key),
+                    curl_core.get(key),
+                )
 
-    # File inventory is a much stronger check than merely seeing HTTP 200.
-    # Name, size, checksums, format, source and mtime must agree with curl JSON.
-    assert normalized_files(item.files) == normalized_files(curl_metadata.get("files", []))
+        # Name, size, checksums, format, source and mtime must agree.
+        assert normalized_files(item.files) == normalized_files(curl_metadata.get("files", []))
 
-    # Independent facts established outside this client.
-    if expected.get("title_contains"):
-        assert expected["title_contains"].lower() in str(item.metadata.get("title", "")).lower()
-    if expected.get("year"):
-        metadata_text ← json.dumps(item.metadata, ensure_ascii=False)
-        assert expected["year"] in metadata_text
+        expected_title ← case.get("title_contains")
+        if expected_title:
+            assert expected_title.lower() in str(item.metadata.get("title", "")).lower()
+        expected_date ← case.get("date_contains")
+        if expected_date:
+            assert expected_date in str(item.metadata.get("date", ""))
 
-    # Exact-identifier search must agree with curl's Advanced Search response.
+    # Exact-identifier search must agree with curl, including a zero-row result
+    # for a dark item.
     curl_search ← load_json(SNAPSHOT_DIR / f"{identifier}.search.json")
     curl_docs ← curl_search.get("response", {}).get("docs", [])
     ithon_docs ← list(session.search_items(
@@ -109,20 +122,38 @@ for identifier, expected in ITEMS.items():
         params={"rows": 10},
     ))
     assert ithon_docs == curl_docs, (identifier, ithon_docs, curl_docs)
-    assert any(document.get("identifier") == identifier for document in ithon_docs)
+    if state == "dark":
+        assert len(ithon_docs) == case.get("expected_search_count", 0)
+    else:
+        assert any(document.get("identifier") == identifier for document in ithon_docs)
 
-    # Probe only the first 256 bytes of the public _meta.xml. No full download.
+    # Construct the same file URL even when Archive refuses access. Compare
+    # status codes first; only compare bytes when both clients actually serve a
+    # range response.
     metadata_file ← item.get_file(f"{identifier}_meta.xml")
     expected_url ← f"https://archive.org/download/{identifier}/{identifier}_meta.xml"
     assert metadata_file.url == expected_url
-    curl_range ← (SNAPSHOT_DIR / f"{identifier}.range.body").read_bytes()
-    ithon_range ← direct_range(metadata_file.url)
-    assert ithon_range == curl_range
-    assert 1 <= len(ithon_range) <= 256
+    expected_range_status ← case.get("expected_range_status")
+    if expected_range_status is not None:
+        assert curl_range_status == expected_range_status, (
+            identifier,
+            curl_range_status,
+            expected_range_status,
+        )
+    ithon_range_status, ithon_range ← direct_range(metadata_file.url)
+    assert ithon_range_status == curl_range_status, (
+        identifier,
+        ithon_range_status,
+        curl_range_status,
+    )
+    if curl_range_status in (200, 206):
+        curl_range ← (SNAPSHOT_DIR / f"{identifier}.range.body").read_bytes()
+        assert ithon_range == curl_range
+        assert 1 <= len(ithon_range) <= 256
 
 
-# The username probe is allowed to be empty, but two independent clients
-# must still agree on the response structure and rows at the same moment.
+curl_username_status ← load_status(SNAPSHOT_DIR / "isomorphisms.search.status")
+assert curl_username_status == 200
 curl_username ← load_json(SNAPSHOT_DIR / "isomorphisms.search.json")
 curl_username_docs ← curl_username.get("response", {}).get("docs", [])
 ithon_username_docs ← list(session.search_items(
