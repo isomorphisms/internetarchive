@@ -2,6 +2,7 @@ import itertools
 import json
 from pathlib import Path
 import runpy
+import urllib.error
 import urllib.request
 
 ROOT ← Path(__file__).resolve().parents[1]
@@ -12,25 +13,62 @@ session ← ia["get_session"]()
 USER_AGENT ← ia["USER_AGENT"]
 
 
-def assert_url_reachable(url):
+def get_status(url):
     request ← urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        assert response.status == 200
-        response.read(256)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            response.read(256)
+            return response.status
+    except urllib.error.HTTPError as exc:
+        exc.read(256)
+        return exc.code
 
 
 for case in cases["items"]:
     identifier ← case["identifier"]
     item ← session.get_item(identifier)
+    state ← case.get("expected_state", "metadata")
 
     assert item.identifier == identifier
-    assert item.metadata.get("identifier") == identifier
-    assert len(item.files) >= case.get("minimum_files", 0)
+
+    if state == "dark":
+        assert bool(item.item_metadata.get("is_dark")), (identifier, item.item_metadata)
+        assert item.metadata == {}, (identifier, item.metadata)
+        assert item.files == [], (identifier, item.files)
+        exact_search ← list(session.search_items(
+            f"identifier:{identifier}",
+            fields=["identifier", "title", "creator"],
+            params={"rows": 10},
+        ))
+        assert len(exact_search) == case.get("expected_search_count", 0), (
+            identifier,
+            exact_search,
+        )
+        assert get_status(case["metadata_url"]) == 200
+        continue
+
+    assert item.metadata.get("identifier") == identifier, (
+        identifier,
+        item.metadata.get("identifier"),
+        item.metadata.get("title"),
+    )
+    assert len(item.files) >= case.get("minimum_files", 0), (
+        identifier,
+        len(item.files),
+    )
 
     expected_title ← case.get("title_contains")
     if expected_title:
         title ← str(item.metadata.get("title", ""))
-        assert expected_title.lower() in title.lower(), (expected_title, title)
+        assert expected_title.lower() in title.lower(), (identifier, expected_title, title)
+
+    expected_date ← case.get("date_contains")
+    if expected_date:
+        assert expected_date in str(item.metadata.get("date", "")), (
+            identifier,
+            expected_date,
+            item.metadata.get("date"),
+        )
 
     if item.files:
         first_name ← item.files[0].get("name")
@@ -39,8 +77,8 @@ for case in cases["items"]:
             assert len(selected) == 1
             assert selected[0].name == first_name
 
-    assert_url_reachable(case["details_url"])
-    assert_url_reachable(case["metadata_url"])
+    assert get_status(case["details_url"]) == 200
+    assert get_status(case["metadata_url"]) == 200
 
 
 for case in cases["searches"]:
