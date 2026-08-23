@@ -31,5 +31,5 @@ jobs:
       - name: Run Ithon smoke test
         run: ./_ithon/python tests_ithon/test_ia.pi
 
-      - name: Check CLI parser under Ithon
-        run: ./_ithon/python ithon/ia.pi --help >/dev/null
+      - name: Check CLI launcher under Ithon
+        run: ITHON=./_ithon/python ./bin/ia-ithon --help >/dev/null

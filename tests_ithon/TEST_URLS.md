@@ -21,20 +21,19 @@ Live assertions:
 
 ## Mumford: Tata Lectures on Theta
 
-Directly relevant to the theta project.
+Directly relevant to the theta project. Archive currently exposes this identifier as a dark-item stub, so it is the negative fixture.
 
 - Details: `https://archive.org/details/tatalecturesonth00mumf_330`
 - Metadata: `https://archive.org/metadata/tatalecturesonth00mumf_330`
 - Identifier: `tatalecturesonth00mumf_330`
 
-Live assertions:
+Live/differential assertions:
 
-- details URL answers successfully
-- metadata URL answers successfully
-- metadata identifier is exact
-- title contains `Tata`
-- item has files
-- exact-filename filtering can select a real file from returned metadata
+- metadata endpoint returns the dark-item stub successfully
+- `is_dark` is set
+- metadata and file inventories are empty
+- exact-identifier search returns zero rows
+- the metadata-file range URL is constructed normally and Archive returns `403`
 
 ## Username probe
 
