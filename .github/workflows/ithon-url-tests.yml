@@ -39,6 +39,9 @@ jobs:
           ARCHIVE_SNAPSHOT_DIR: browser-responses
         run: ./_ithon/python tests_ithon/test_differential_archive.pi
 
+      - name: Run HEAD range and filter tests
+        run: ./_ithon/python tests_ithon/test_read_only_http.pi
+
       - name: Run live Archive integration tests
         run: ./_ithon/python tests_ithon/test_live_archive.pi
 
