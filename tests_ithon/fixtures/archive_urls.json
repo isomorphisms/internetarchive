@@ -2,10 +2,10 @@
   "items": [
     {
       "name": "hegel-myths-and-legends",
-      "why": "Exact Internet Archive item recovered from the user's Hegel material/history.",
-      "identifier": "hegelmythslegendOOOOunse",
-      "details_url": "https://archive.org/details/hegelmythslegendOOOOunse",
-      "metadata_url": "https://archive.org/metadata/hegelmythslegendOOOOunse",
+      "why": "Internet Archive edition of the Hegel book the user supplied and is actively using.",
+      "identifier": "hegelmythslegend0000unse",
+      "details_url": "https://archive.org/details/hegelmythslegend0000unse",
+      "metadata_url": "https://archive.org/metadata/hegelmythslegend0000unse",
       "title_contains": "Hegel",
       "minimum_files": 1
     },
