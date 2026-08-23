@@ -1,0 +1,39 @@
+{
+  "items": [
+    {
+      "name": "hegel-myths-and-legends",
+      "why": "Exact Internet Archive item recovered from the user's Hegel material/history.",
+      "identifier": "hegelmythslegendOOOOunse",
+      "details_url": "https://archive.org/details/hegelmythslegendOOOOunse",
+      "metadata_url": "https://archive.org/metadata/hegelmythslegendOOOOunse",
+      "title_contains": "Hegel",
+      "minimum_files": 1
+    },
+    {
+      "name": "mumford-tata-lectures-theta",
+      "why": "Theta-project reference: David Mumford, Tata Lectures on Theta.",
+      "identifier": "tatalecturesonth00mumf_330",
+      "details_url": "https://archive.org/details/tatalecturesonth00mumf_330",
+      "metadata_url": "https://archive.org/metadata/tatalecturesonth00mumf_330",
+      "title_contains": "Tata",
+      "minimum_files": 1
+    },
+    {
+      "name": "upstream-nasa-control",
+      "why": "Control item used by the original jjjake internetarchive documentation.",
+      "identifier": "nasa",
+      "details_url": "https://archive.org/details/nasa",
+      "metadata_url": "https://archive.org/metadata/nasa",
+      "minimum_files": 1
+    }
+  ],
+  "searches": [
+    {
+      "name": "isomorphisms-uploader-probe",
+      "why": "Public-handle probe. It is allowed to return zero rows; the test is API/URL behavior, not an assertion that this Archive account exists.",
+      "query": "uploader:isomorphisms",
+      "url": "https://archive.org/advancedsearch.php?q=uploader%3Aisomorphisms&fl%5B%5D=identifier&fl%5B%5D=title&rows=10&page=1&output=json",
+      "allow_empty": true
+    }
+  ]
+}
