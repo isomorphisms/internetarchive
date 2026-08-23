@@ -6,17 +6,24 @@
       "identifier": "hegelmythslegend0000unse",
       "details_url": "https://archive.org/details/hegelmythslegend0000unse",
       "metadata_url": "https://archive.org/metadata/hegelmythslegend0000unse",
+      "expected_state": "metadata",
       "title_contains": "Hegel",
-      "minimum_files": 1
+      "date_contains": "1996",
+      "minimum_files": 1,
+      "expected_range_status": 206
     },
     {
-      "name": "mumford-tata-lectures-theta",
-      "why": "Theta-project reference: David Mumford, Tata Lectures on Theta.",
+      "name": "mumford-tata-lectures-theta-dark",
+      "why": "Theta-project reference: David Mumford, Tata Lectures on Theta. Archive currently exposes this identifier as a dark-item stub, which makes it a useful negative fixture.",
       "identifier": "tatalecturesonth00mumf_330",
       "details_url": "https://archive.org/details/tatalecturesonth00mumf_330",
       "metadata_url": "https://archive.org/metadata/tatalecturesonth00mumf_330",
-      "title_contains": "Tata",
-      "minimum_files": 1
+      "expected_state": "dark",
+      "external_title_contains": "Tata",
+      "external_date_contains": "1983",
+      "minimum_files": 0,
+      "expected_search_count": 0,
+      "expected_range_status": 403
     },
     {
       "name": "upstream-nasa-control",
@@ -24,6 +31,7 @@
       "identifier": "nasa",
       "details_url": "https://archive.org/details/nasa",
       "metadata_url": "https://archive.org/metadata/nasa",
+      "expected_state": "metadata",
       "minimum_files": 1
     }
   ],
