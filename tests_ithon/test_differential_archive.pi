@@ -1,3 +1,4 @@
+import itertools
 import json
 import os
 from pathlib import Path
@@ -150,6 +151,29 @@ for case in cases["items"]:
         curl_range ← (SNAPSHOT_DIR / f"{identifier}.range.body").read_bytes()
         assert ithon_range == curl_range
         assert 1 <= len(ithon_range) <= 256
+
+
+# Pagination: curl fetches pages independently; the Ithon iterator must flatten
+# them in exactly the same order when rows=2 and the sort is fixed.
+curl_paged_docs ← []
+for page in (1, 2):
+    status ← load_status(SNAPSHOT_DIR / f"hegel.page{page}.search.status")
+    assert status == 200, ("Hegel pagination", page, status)
+    payload ← load_json(SNAPSHOT_DIR / f"hegel.page{page}.search.json")
+    docs ← payload.get("response", {}).get("docs", [])
+    assert len(docs) == 2, ("Hegel pagination", page, docs)
+    curl_paged_docs.extend(docs)
+
+ithon_paged_docs ← list(itertools.islice(
+    session.search_items(
+        "Hegel",
+        fields=["identifier", "title"],
+        sorts=["identifier asc"],
+        params={"rows": 2},
+    ),
+    4,
+))
+assert ithon_paged_docs == curl_paged_docs, (ithon_paged_docs, curl_paged_docs)
 
 
 curl_username_status ← load_status(SNAPSHOT_DIR / "isomorphisms.search.status")
