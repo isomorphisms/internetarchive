@@ -1,0 +1,32 @@
+name: Ithon Archive URL tests
+
+on:
+  push:
+    branches:
+      - ithon-rewrite
+  workflow_dispatch:
+
+jobs:
+  archive-urls:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out Internet Archive fork
+        uses: actions/checkout@v4
+
+      - name: Check out Ithon
+        uses: actions/checkout@v4
+        with:
+          repository: isomorphisms/ithon
+          path: _ithon
+
+      - name: Build Ithon
+        working-directory: _ithon
+        run: |
+          ./configure
+          make -j2
+
+      - name: Check URL fixtures
+        run: ./_ithon/python tests_ithon/test_fixture_urls.pi
+
+      - name: Run live Archive integration tests
+        run: ./_ithon/python tests_ithon/test_live_archive.pi
