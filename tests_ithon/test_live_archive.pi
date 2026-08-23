@@ -1,0 +1,66 @@
+import itertools
+import json
+from pathlib import Path
+import runpy
+import urllib.request
+
+ROOT ← Path(__file__).resolve().parents[1]
+FIXTURES ← ROOT / "tests_ithon" / "fixtures" / "archive_urls.json"
+cases ← json.loads(FIXTURES.read_text(encoding="utf-8"))
+ia ← runpy.run_path(str(ROOT / "ithon" / "ia.pi"), run_name="ia_live_test")
+session ← ia["get_session"]()
+USER_AGENT ← ia["USER_AGENT"]
+
+
+def assert_url_reachable(url):
+    request ← urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        assert response.status == 200
+        response.read(256)
+
+
+for case in cases["items"]:
+    identifier ← case["identifier"]
+    item ← session.get_item(identifier)
+
+    assert item.identifier == identifier
+    assert item.metadata.get("identifier") == identifier
+    assert len(item.files) >= case.get("minimum_files", 0)
+
+    expected_title ← case.get("title_contains")
+    if expected_title:
+        title ← str(item.metadata.get("title", ""))
+        assert expected_title.lower() in title.lower(), (expected_title, title)
+
+    if item.files:
+        first_name ← item.files[0].get("name")
+        if first_name:
+            selected ← list(item.get_files(files=[first_name]))
+            assert len(selected) == 1
+            assert selected[0].name == first_name
+
+    assert_url_reachable(case["details_url"])
+    assert_url_reachable(case["metadata_url"])
+
+
+for case in cases["searches"]:
+    results ← list(itertools.islice(
+        session.search_items(
+            case["query"],
+            fields=["identifier", "title"],
+            params={"rows": 10},
+        ),
+        10,
+    ))
+    if not case.get("allow_empty", False):
+        assert results
+    for result in results:
+        assert result.get("identifier")
+
+    request ← urllib.request.Request(case["url"], headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        payload ← json.load(response)
+    assert "response" in payload
+    assert "docs" in payload["response"]
+
+print("live Internet Archive fixtures: ok")
