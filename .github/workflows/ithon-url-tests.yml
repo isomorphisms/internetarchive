@@ -16,14 +16,14 @@ jobs:
       - name: Check out Internet Archive fork
         uses: actions/checkout@v4
 
-      - name: Snapshot isomorphisms favorites
-        run: sh tests_ithon/fetch_isomorphisms_favorites.sh isomorphisms-favorites.json
+      - name: Capture isomorphisms favorites collection
+        run: sh tests_ithon/capture_favorites_sources.sh favorites-sources
 
-      - name: Preserve favorites snapshot
+      - name: Preserve favorites collection surfaces
         uses: actions/upload-artifact@v4
         with:
-          name: isomorphisms-archive-favorites
-          path: isomorphisms-favorites.json
+          name: isomorphisms-favorites-sources
+          path: favorites-sources
 
       - name: Check out Ithon
         uses: actions/checkout@v4
