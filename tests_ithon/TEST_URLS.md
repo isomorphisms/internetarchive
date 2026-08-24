@@ -1,54 +1,65 @@
 # Internet Archive test URLs
 
-These are concrete Internet Archive URLs the user has actually supplied or used, plus one upstream control. They are not a claim about which items are in the user's Archive favorites list.
+The preferred live fixtures come from the user's actual Archive favorites account: screenname `isomorphismes`, list `fav-isomorphismes`.
 
-## User-supplied / user-used Archive items
+The complete favorites snapshot is stored in:
 
-### Hegel: Myths and Legends
+- `tests_ithon/ISOMORPHISMS_FAVORITES.md`
+- `tests_ithon/fixtures/isomorphismes_favorites.json`
 
-- Details: `https://archive.org/details/hegelmythslegend0000unse`
-- Metadata: `https://archive.org/metadata/hegelmythslegend0000unse`
-- Identifier: `hegelmythslegend0000unse`
+The live suite uses a small deterministic sample so CI does not issue hundreds of requests.
 
-### JSTOR 108997
+## Favorite fixtures used by CI
 
-The user previously used the direct file URL `https://archive.org/download/jstor-108997/108997.pdf`.
+### An invitation to algebraic geometry
 
-- Details: `https://archive.org/details/jstor-108997`
-- Metadata: `https://archive.org/metadata/jstor-108997`
-- Identifier: `jstor-108997`
+- Identifier: `isbn_9780387989808`
+- Details: `https://archive.org/details/isbn_9780387989808`
+- Metadata: `https://archive.org/metadata/isbn_9780387989808`
 
-### Cayley collected mathematical papers, volume 6
+### Farm drainage
 
-- Details: `https://archive.org/details/collectedmathema06cayluoft`
-- Metadata: `https://archive.org/metadata/collectedmathema06cayluoft`
-- Identifier: `collectedmathema06cayluoft`
+- Identifier: `farmdrainage00fren`
+- Details: `https://archive.org/details/farmdrainage00fren`
+- Metadata: `https://archive.org/metadata/farmdrainage00fren`
 
-### Noveltoons collection
+### Albrecht Dürer's Unterweisung der Messung
 
-- Details: `https://archive.org/details/noveltoons-collection`
-- Metadata: `https://archive.org/metadata/noveltoons-collection`
-- Identifier: `noveltoons-collection`
+- Identifier: `albrechtdrersun01peltgoog`
+- Details: `https://archive.org/details/albrechtdrersun01peltgoog`
+- Metadata: `https://archive.org/metadata/albrechtdrersun01peltgoog`
 
-These items are used for read-only tests: metadata, exact search, file inventories, generated URLs, HEAD/range requests, format/glob filtering, and curl/Ithon differential checks. Full-file downloads are not required.
+### Philosophical Magazine, volume 47 (1924)
 
-## Archive favorites source
+- Identifier: `philosophical-magazine-vol-47-1924`
+- Details: `https://archive.org/details/philosophical-magazine-vol-47-1924`
+- Metadata: `https://archive.org/metadata/philosophical-magazine-vol-47-1924`
 
-The canonical favorites API is:
+### The Absolute Differential Calculus
 
-`https://archive.org/bookmarks.php?output=json&screenname=<archive-screenname>`
+- Identifier: `TheAbsoluteDifferentialCalculus`
+- Details: `https://archive.org/details/TheAbsoluteDifferentialCalculus`
+- Metadata: `https://archive.org/metadata/TheAbsoluteDifferentialCalculus`
 
-`screenname=isomorphisms` is **not** the user's Archive account: Archive returns `The user account does not seem to exist.` Likewise, `fav-isomorphisms` is an empty generated collection shell. Therefore this repository must not pretend that `fav-isomorphisms` is the user's favorites list.
+### On a New Geometry of Space
 
-Once the actual Archive screenname/profile identifier is known, the favorites list should be committed separately as `tests_ithon/ISOMORPHISMS_FAVORITES.md` plus a machine-readable fixture and should become the preferred source for new test URLs.
+- Identifier: `philtrans04968378`
+- Details: `https://archive.org/details/philtrans04968378`
+- Metadata: `https://archive.org/metadata/philtrans04968378`
 
-## Username probe
+These exercise metadata parsing, exact-identifier search, file inventories, generated download URLs, HEAD requests, tiny byte-range requests, format/glob filtering, and curl/Ithon differential checks. They do not require full content downloads.
 
-`uploader:isomorphisms` remains only a harmless API probe. Zero rows are allowed; it is not evidence about the user's Archive account.
+## Favorites API
+
+Archive exposes this list through:
+
+`https://archive.org/bookmarks.php?output=json&screenname=isomorphismes`
+
+The snapshot workflow verifies every returned row is a `favorite` belonging to `@isomorphismes` / `fav-isomorphismes` before committing it.
 
 ## Upstream control
 
-The old jjjake documentation repeatedly uses `nasa`, so retain one upstream control fixture.
+The old jjjake documentation repeatedly uses `nasa`, so retain one non-personal control fixture:
 
 - Details: `https://archive.org/details/nasa`
 - Metadata: `https://archive.org/metadata/nasa`
