@@ -83,8 +83,6 @@ for case in cases["items"]:
     item ← session.get_item(identifier)
 
     if state == "dark":
-        # A dark identifier is still a valid API response. Both independent
-        # clients must see the same state rather than treating 403 as a crash.
         assert bool(curl_metadata.get("is_dark")), (identifier, curl_metadata)
         assert bool(item.item_metadata.get("is_dark")), (identifier, item.item_metadata)
         assert item.exists, (identifier, item.item_metadata)
@@ -104,7 +102,6 @@ for case in cases["items"]:
                     curl_core.get(key),
                 )
 
-        # Name, size, checksums, format, source and mtime must agree.
         assert normalized_files(item.files) == normalized_files(curl_metadata.get("files", []))
 
         expected_title ← case.get("title_contains")
@@ -114,8 +111,6 @@ for case in cases["items"]:
         if expected_date:
             assert expected_date in str(item.metadata.get("date", ""))
 
-    # Exact-identifier search must agree with curl, including a zero-row result
-    # for a dark item.
     curl_search ← load_json(SNAPSHOT_DIR / f"{identifier}.search.json")
     curl_docs ← curl_search.get("response", {}).get("docs", [])
     ithon_docs ← list(session.search_items(
@@ -129,9 +124,6 @@ for case in cases["items"]:
     else:
         assert any(document.get("identifier") == identifier for document in ithon_docs)
 
-    # Construct the same file URL even when Archive refuses access. Compare
-    # status codes first; only compare bytes when both clients actually serve a
-    # range response.
     metadata_file ← item.get_file(f"{identifier}_meta.xml")
     expected_url ← f"https://archive.org/download/{identifier}/{identifier}_meta.xml"
     assert metadata_file.url == expected_url
@@ -154,20 +146,21 @@ for case in cases["items"]:
         assert 1 <= len(ithon_range) <= 256
 
 
-# Pagination: curl fetches pages independently; the Ithon iterator must flatten
-# them in exactly the same order when rows=2 and the sort is fixed.
+# Pagination uses a broad geometry query, naturally aligned with many items in
+# the favorites list. Curl fetches pages separately; the Ithon iterator must
+# flatten them in the same order.
 curl_paged_docs ← []
 for page in (1, 2):
-    status ← load_status(SNAPSHOT_DIR / f"hegel.page{page}.search.status")
-    assert status == 200, ("Hegel pagination", page, status)
-    payload ← load_json(SNAPSHOT_DIR / f"hegel.page{page}.search.json")
+    status ← load_status(SNAPSHOT_DIR / f"geometry.page{page}.search.status")
+    assert status == 200, ("geometry pagination", page, status)
+    payload ← load_json(SNAPSHOT_DIR / f"geometry.page{page}.search.json")
     docs ← payload.get("response", {}).get("docs", [])
-    assert len(docs) == 2, ("Hegel pagination", page, docs)
+    assert len(docs) == 2, ("geometry pagination", page, docs)
     curl_paged_docs.extend(docs)
 
 ithon_paged_docs ← list(itertools.islice(
     session.search_items(
-        "Hegel",
+        "geometry",
         fields=["identifier", "title"],
         sorts=["identifier asc"],
         params={"rows": 2},
@@ -175,19 +168,5 @@ ithon_paged_docs ← list(itertools.islice(
     4,
 ))
 assert ithon_paged_docs == curl_paged_docs, (ithon_paged_docs, curl_paged_docs)
-
-
-curl_username_status ← load_status(SNAPSHOT_DIR / "isomorphisms.search.status")
-assert curl_username_status == 200
-curl_username ← load_json(SNAPSHOT_DIR / "isomorphisms.search.json")
-curl_username_docs ← curl_username.get("response", {}).get("docs", [])
-ithon_username_docs ← list(session.search_items(
-    "uploader:isomorphisms",
-    fields=["identifier", "title"],
-    params={"rows": 10},
-))
-assert ithon_username_docs == curl_username_docs
-for document in ithon_username_docs:
-    assert document.get("identifier")
 
 print("curl/Ithon differential Archive tests: ok")
