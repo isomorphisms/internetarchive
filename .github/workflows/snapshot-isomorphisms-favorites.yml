@@ -4,72 +4,22 @@ on:
   push:
     branches:
       - ithon-rewrite
+  pull_request:
+    branches:
+      - master
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   snapshot:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+
+      - name: Capture favorites collection surfaces
+        run: sh tests_ithon/capture_favorites_sources.sh favorites-sources
+
+      - name: Preserve favorites sources
+        uses: actions/upload-artifact@v4
         with:
-          ref: ithon-rewrite
-
-      - name: Fetch favorites
-        run: |
-          mkdir -p tests_ithon/fixtures
-          sh tests_ithon/fetch_isomorphisms_favorites.sh tests_ithon/fixtures/isomorphisms_favorites.json
-
-      - name: Write readable favorites list
-        run: python - <<'PY'
-          import json
-          from pathlib import Path
-
-          source = Path('tests_ithon/fixtures/isomorphisms_favorites.json')
-          data = json.loads(source.read_text())
-          response = data['response']
-          docs = response['docs']
-
-          lines = [
-              '# isomorphisms Internet Archive favorites',
-              '',
-              'Canonical test-data source for this repository.',
-              '',
-              'Archive collection: `fav-isomorphisms`',
-              '',
-              f'Favorites in snapshot: **{response["numFound"]}**',
-              '',
-              '| Item | Identifier | Type | Creator / date |',
-              '| --- | --- | --- | --- |',
-          ]
-          for item in docs:
-              identifier = str(item.get('identifier', ''))
-              title = str(item.get('title') or identifier).replace('|', '\\|')
-              mediatype = str(item.get('mediatype', '')).replace('|', '\\|')
-              creator = item.get('creator', '')
-              if isinstance(creator, list):
-                  creator = '; '.join(map(str, creator))
-              creator = str(creator).replace('|', '\\|')
-              date = str(item.get('date', '')).replace('|', '\\|')
-              who = ' — '.join(x for x in (creator, date) if x)
-              lines.append(
-                  f'| [{title}](https://archive.org/details/{identifier}) | `{identifier}` | {mediatype} | {who} |'
-              )
-
-          Path('tests_ithon/ISOMORPHISMS_FAVORITES.md').write_text('\n'.join(lines) + '\n')
-          print('favorites:', response['numFound'])
-          PY
-
-      - name: Commit changed snapshot
-        run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add tests_ithon/fixtures/isomorphisms_favorites.json tests_ithon/ISOMORPHISMS_FAVORITES.md
-          if git diff --cached --quiet; then
-            echo 'favorites snapshot unchanged'
-            exit 0
-          fi
-          git commit -m 'Refresh isomorphisms Archive favorites'
-          git push origin HEAD:ithon-rewrite
+          name: isomorphisms-favorites-sources
+          path: favorites-sources
