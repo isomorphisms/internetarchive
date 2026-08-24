@@ -2,7 +2,7 @@
   "items": [
     {
       "name": "hegel-myths-and-legends",
-      "why": "Internet Archive edition of the Hegel book the user supplied and is actively using.",
+      "why": "Exact Internet Archive item previously supplied by the user.",
       "identifier": "hegelmythslegend0000unse",
       "details_url": "https://archive.org/details/hegelmythslegend0000unse",
       "metadata_url": "https://archive.org/metadata/hegelmythslegend0000unse",
@@ -13,17 +13,31 @@
       "expected_range_status": 206
     },
     {
-      "name": "mumford-tata-lectures-theta-dark",
-      "why": "Theta-project reference: David Mumford, Tata Lectures on Theta. Archive currently exposes this identifier as a dark-item stub, which makes it a useful negative fixture.",
-      "identifier": "tatalecturesonth00mumf_330",
-      "details_url": "https://archive.org/details/tatalecturesonth00mumf_330",
-      "metadata_url": "https://archive.org/metadata/tatalecturesonth00mumf_330",
-      "expected_state": "dark",
-      "external_title_contains": "Tata",
-      "external_date_contains": "1983",
-      "minimum_files": 0,
-      "expected_search_count": 0,
-      "expected_range_status": 403
+      "name": "jstor-108997",
+      "why": "Exact Internet Archive JSTOR item previously used by the user; the user supplied its 108997.pdf download URL.",
+      "identifier": "jstor-108997",
+      "details_url": "https://archive.org/details/jstor-108997",
+      "metadata_url": "https://archive.org/metadata/jstor-108997",
+      "expected_state": "metadata",
+      "minimum_files": 1
+    },
+    {
+      "name": "cayley-collected-mathematical-papers-volume-6",
+      "why": "Exact Internet Archive item previously used by the user.",
+      "identifier": "collectedmathema06cayluoft",
+      "details_url": "https://archive.org/details/collectedmathema06cayluoft",
+      "metadata_url": "https://archive.org/metadata/collectedmathema06cayluoft",
+      "expected_state": "metadata",
+      "minimum_files": 1
+    },
+    {
+      "name": "noveltoons-collection",
+      "why": "Exact Internet Archive collection previously used by the user.",
+      "identifier": "noveltoons-collection",
+      "details_url": "https://archive.org/details/noveltoons-collection",
+      "metadata_url": "https://archive.org/metadata/noveltoons-collection",
+      "expected_state": "metadata",
+      "minimum_files": 1
     },
     {
       "name": "upstream-nasa-control",
@@ -38,7 +52,7 @@
   "searches": [
     {
       "name": "isomorphisms-uploader-probe",
-      "why": "Public-handle probe. It is allowed to return zero rows; the test is API/URL behavior, not an assertion that this Archive account exists.",
+      "why": "Public-handle probe only; Archive's bookmarks API confirms that `isomorphisms` is not the user's Archive screenname.",
       "query": "uploader:isomorphisms",
       "url": "https://archive.org/advancedsearch.php?q=uploader%3Aisomorphisms&fl%5B%5D=identifier&fl%5B%5D=title&rows=10&page=1&output=json",
       "allow_empty": true
