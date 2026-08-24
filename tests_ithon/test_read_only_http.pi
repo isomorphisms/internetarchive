@@ -1,19 +1,16 @@
 import contextlib
 import io
+import json
 from pathlib import Path
 import runpy
 import urllib.request
 
 ROOT ← Path(__file__).resolve().parents[1]
+FIXTURES ← ROOT / "tests_ithon" / "fixtures" / "archive_urls.json"
 ia ← runpy.run_path(str(ROOT / "ithon" / "ia.pi"), run_name="ia_read_only_test")
 session ← ia["get_session"]()
 USER_AGENT ← ia["USER_AGENT"]
-
-IDENTIFIERS ← (
-    "hegelmythslegend0000unse",
-    "tatalecturesonth00mumf_330",
-    "nasa",
-)
+cases ← json.loads(FIXTURES.read_text(encoding="utf-8"))
 
 
 def head(url):
@@ -36,7 +33,11 @@ def one_byte(url):
         return response.status, dict(response.headers.items()), byte
 
 
-for identifier in IDENTIFIERS:
+for case in cases["items"]:
+    if case.get("expected_state", "metadata") != "metadata":
+        continue
+
+    identifier ← case["identifier"]
     item ← session.get_item(identifier)
 
     # Local filename filtering must agree with the actual metadata inventory.
@@ -64,7 +65,7 @@ for identifier in IDENTIFIERS:
         assert actual == expected
 
     # System XML is public and small. HEAD verifies URL construction and size
-    # without downloading the body; a 1-byte range verifies that byte serving works.
+    # without downloading the body; a 1-byte range verifies byte serving.
     candidates ← sorted(meta_names or files_xml_names)
     if candidates:
         name ← candidates[0]
@@ -88,7 +89,7 @@ for identifier in IDENTIFIERS:
             content_range ← range_headers.get("Content-Range") or range_headers.get("content-range")
             assert content_range and content_range.startswith("bytes 0-0/")
 
-    # dry_run must emit download URLs and must not create files.
+    # dry_run emits the URL and creates no local content file.
     if candidates:
         output ← io.StringIO()
         with contextlib.redirect_stdout(output):
