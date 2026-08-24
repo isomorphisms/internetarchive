@@ -1,0 +1,31 @@
+name: Snapshot isomorphisms Archive favorites
+
+on:
+  push:
+    branches:
+      - ithon-rewrite
+  workflow_dispatch:
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch favorites
+        run: sh tests_ithon/fetch_isomorphisms_favorites.sh isomorphisms-favorites.json
+
+      - name: Show count
+        run: python - <<'PY'
+          import json
+          data = json.load(open('isomorphisms-favorites.json'))
+          response = data['response']
+          print('favorites:', response['numFound'])
+          for item in response['docs']:
+              print(item.get('identifier'), '\t', item.get('title', ''))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: isomorphisms-archive-favorites
+          path: isomorphisms-favorites.json
