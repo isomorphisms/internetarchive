@@ -66,8 +66,13 @@ capture_search_page() {
         > "$OUT/hegel.page${page}.search.status"
 }
 
+# Concrete Archive items the user has actually supplied/used.
 capture_item hegelmythslegend0000unse
-capture_item tatalecturesonth00mumf_330
+capture_item jstor-108997
+capture_item collectedmathema06cayluoft
+capture_item noveltoons-collection
+
+# Upstream control from jjjake's documentation.
 capture_item nasa
 
 capture_search_page 1
