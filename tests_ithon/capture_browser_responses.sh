@@ -54,39 +54,28 @@ capture_search_page() {
     curl --silent --show-error --location \
         --user-agent "$BROWSER_UA" \
         --get 'https://archive.org/advancedsearch.php' \
-        --data-urlencode 'q=Hegel' \
+        --data-urlencode 'q=geometry' \
         --data-urlencode 'fl[]=identifier' \
         --data-urlencode 'fl[]=title' \
         --data-urlencode 'sort[]=identifier asc' \
         --data-urlencode 'rows=2' \
         --data-urlencode "page=$page" \
         --data-urlencode 'output=json' \
-        --output "$OUT/hegel.page${page}.search.json" \
+        --output "$OUT/geometry.page${page}.search.json" \
         --write-out '%{http_code}\n' \
-        > "$OUT/hegel.page${page}.search.status"
+        > "$OUT/geometry.page${page}.search.status"
 }
 
-# Concrete Archive items the user has actually supplied/used.
-capture_item hegelmythslegend0000unse
-capture_item jstor-108997
-capture_item collectedmathema06cayluoft
-capture_item noveltoons-collection
+# Deterministic sample from @isomorphismes favorites.
+capture_item isbn_9780387989808
+capture_item farmdrainage00fren
+capture_item albrechtdrersun01peltgoog
+capture_item philosophical-magazine-vol-47-1924
+capture_item TheAbsoluteDifferentialCalculus
+capture_item philtrans04968378
 
 # Upstream control from jjjake's documentation.
 capture_item nasa
 
 capture_search_page 1
 capture_search_page 2
-
-curl --silent --show-error --location \
-    --user-agent "$BROWSER_UA" \
-    --get 'https://archive.org/advancedsearch.php' \
-    --data-urlencode 'q=uploader:isomorphisms' \
-    --data-urlencode 'fl[]=identifier' \
-    --data-urlencode 'fl[]=title' \
-    --data-urlencode 'rows=10' \
-    --data-urlencode 'page=1' \
-    --data-urlencode 'output=json' \
-    --output "$OUT/isomorphisms.search.json" \
-    --write-out '%{http_code}\n' \
-    > "$OUT/isomorphisms.search.status"
