@@ -1,57 +1,54 @@
 # Internet Archive test URLs
 
-These are intentionally concrete fixtures instead of random public items.
+These are concrete Internet Archive URLs the user has actually supplied or used, plus one upstream control. They are not a claim about which items are in the user's Archive favorites list.
 
-## Hegel: Myths and Legends
+## User-supplied / user-used Archive items
 
-Internet Archive edition of the Hegel book the user supplied and is actively using.
+### Hegel: Myths and Legends
 
 - Details: `https://archive.org/details/hegelmythslegend0000unse`
 - Metadata: `https://archive.org/metadata/hegelmythslegend0000unse`
 - Identifier: `hegelmythslegend0000unse`
 
-Live assertions:
+### JSTOR 108997
 
-- details URL answers successfully
-- metadata URL answers successfully
-- metadata identifier is exact
-- title contains `Hegel`
-- item has files
-- exact-filename filtering can select a real file from returned metadata
+The user previously used the direct file URL `https://archive.org/download/jstor-108997/108997.pdf`.
 
-## Mumford: Tata Lectures on Theta
+- Details: `https://archive.org/details/jstor-108997`
+- Metadata: `https://archive.org/metadata/jstor-108997`
+- Identifier: `jstor-108997`
 
-Directly relevant to the theta project. Archive currently exposes this identifier as a dark-item stub, so it is the negative fixture.
+### Cayley collected mathematical papers, volume 6
 
-- Details: `https://archive.org/details/tatalecturesonth00mumf_330`
-- Metadata: `https://archive.org/metadata/tatalecturesonth00mumf_330`
-- Identifier: `tatalecturesonth00mumf_330`
+- Details: `https://archive.org/details/collectedmathema06cayluoft`
+- Metadata: `https://archive.org/metadata/collectedmathema06cayluoft`
+- Identifier: `collectedmathema06cayluoft`
 
-Live/differential assertions:
+### Noveltoons collection
 
-- metadata endpoint returns the dark-item stub successfully
-- `is_dark` is set
-- metadata and file inventories are empty
-- exact-identifier search returns zero rows
-- the metadata-file range URL is constructed normally and Archive returns `403`
+- Details: `https://archive.org/details/noveltoons-collection`
+- Metadata: `https://archive.org/metadata/noveltoons-collection`
+- Identifier: `noveltoons-collection`
+
+These items are used for read-only tests: metadata, exact search, file inventories, generated URLs, HEAD/range requests, format/glob filtering, and curl/Ithon differential checks. Full-file downloads are not required.
+
+## Archive favorites source
+
+The canonical favorites API is:
+
+`https://archive.org/bookmarks.php?output=json&screenname=<archive-screenname>`
+
+`screenname=isomorphisms` is **not** the user's Archive account: Archive returns `The user account does not seem to exist.` Likewise, `fav-isomorphisms` is an empty generated collection shell. Therefore this repository must not pretend that `fav-isomorphisms` is the user's favorites list.
+
+Once the actual Archive screenname/profile identifier is known, the favorites list should be committed separately as `tests_ithon/ISOMORPHISMS_FAVORITES.md` plus a machine-readable fixture and should become the preferred source for new test URLs.
 
 ## Username probe
 
-The public repository/account handle gives us a useful Archive advanced-search fixture without pretending that an Archive account has been verified.
-
-- Query: `uploader:isomorphisms`
-- URL: `https://archive.org/advancedsearch.php?q=uploader%3Aisomorphisms&fl%5B%5D=identifier&fl%5B%5D=title&rows=10&page=1&output=json`
-
-Live assertions:
-
-- advanced-search endpoint returns JSON
-- JSON contains `response.docs`
-- any returned row has an identifier
-- zero rows is allowed
+`uploader:isomorphisms` remains only a harmless API probe. Zero rows are allowed; it is not evidence about the user's Archive account.
 
 ## Upstream control
 
-The old jjjake documentation repeatedly uses `nasa`, so retain one boring control fixture to distinguish our code failures from peculiarities in the personally relevant items.
+The old jjjake documentation repeatedly uses `nasa`, so retain one upstream control fixture.
 
 - Details: `https://archive.org/details/nasa`
 - Metadata: `https://archive.org/metadata/nasa`
