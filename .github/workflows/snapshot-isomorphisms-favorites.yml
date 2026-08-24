@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - ithon-rewrite
+  pull_request:
+    branches:
+      - master
   workflow_dispatch:
 
 jobs:
