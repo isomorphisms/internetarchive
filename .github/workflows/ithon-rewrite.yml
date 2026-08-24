@@ -1,0 +1,39 @@
+name: Ithon rewrite
+
+on:
+  push:
+    branches:
+      - ithon-rewrite
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: ithon-rewrite-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out Internet Archive fork
+        uses: actions/checkout@v4
+
+      - name: Check out Ithon
+        uses: actions/checkout@v4
+        with:
+          repository: isomorphisms/ithon
+          path: _ithon
+
+      - name: Build Ithon
+        working-directory: _ithon
+        run: |
+          ./configure
+          make -j2
+
+      - name: Run Ithon smoke test
+        run: ./_ithon/python tests_ithon/test_ia.pi
+
+      - name: Check CLI launcher under Ithon
+        run: ITHON=./_ithon/python ./bin/ia-ithon --help >/dev/null

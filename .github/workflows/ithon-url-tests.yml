@@ -1,0 +1,66 @@
+name: Ithon Archive URL tests
+
+on:
+  push:
+    branches:
+      - ithon-rewrite
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: ithon-url-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  archive-urls:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out Internet Archive fork
+        uses: actions/checkout@v4
+
+      - name: Capture isomorphisms favorites collection
+        run: sh tests_ithon/capture_favorites_sources.sh favorites-sources
+
+      - name: Preserve favorites collection surfaces
+        uses: actions/upload-artifact@v4
+        with:
+          name: isomorphisms-favorites-sources
+          path: favorites-sources
+
+      - name: Check out Ithon
+        uses: actions/checkout@v4
+        with:
+          repository: isomorphisms/ithon
+          path: _ithon
+
+      - name: Build Ithon
+        working-directory: _ithon
+        run: |
+          ./configure
+          make -j2
+
+      - name: Check URL fixtures
+        run: ./_ithon/python tests_ithon/test_fixture_urls.pi
+
+      - name: Capture independent browser responses
+        run: sh tests_ithon/capture_browser_responses.sh browser-responses
+
+      - name: Compare Ithon against curl
+        env:
+          ARCHIVE_SNAPSHOT_DIR: browser-responses
+        run: ./_ithon/python tests_ithon/test_differential_archive.pi
+
+      - name: Run HEAD range and filter tests
+        run: ./_ithon/python tests_ithon/test_read_only_http.pi
+
+      - name: Run live Archive integration tests
+        run: ./_ithon/python tests_ithon/test_live_archive.pi
+
+      - name: Preserve browser responses
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-browser-responses
+          path: browser-responses

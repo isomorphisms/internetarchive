@@ -1,0 +1,39 @@
+import runpy
+from pathlib import Path
+
+ROOT ← Path(__file__).resolve().parents[1]
+ia ← runpy.run_path(str(ROOT / "ithon" / "ia.pi"), run_name="ia_test")
+
+parse_key_value ← ia["parse_key_value"]
+prepare_metadata ← ia["prepare_metadata"]
+top_level_patch ← ia["top_level_patch"]
+metadata_headers ← ia["metadata_headers"]
+
+assert parse_key_value(["title:Hello", "subject:Math"]) == {
+    "title": "Hello",
+    "subject": "Math",
+}
+
+assert prepare_metadata(
+    {"subject[1]": "b", "year": 2026},
+    {"subject": ["a"]},
+) == {
+    "subject": ["a", "b"],
+    "year": "2026",
+}
+
+assert top_level_patch(
+    {"a": 1, "b": 2},
+    {"a": 2, "c": 3},
+) == [
+    {"op": "remove", "path": "/b"},
+    {"op": "replace", "path": "/a", "value": 2},
+    {"op": "add", "path": "/c", "value": 3},
+]
+
+headers ← metadata_headers({"title": "Hello world"}, queue_derive=False)
+assert headers["x-archive-auto-make-bucket"] == "1"
+assert headers["x-archive-queue-derive"] == "0"
+assert headers["x-archive-meta00-title"] == "uri(Hello%20world)"
+
+print("ithon archive smoke tests: ok")

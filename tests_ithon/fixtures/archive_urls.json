@@ -1,0 +1,69 @@
+{
+  "items": [
+    {
+      "name": "favorite-invitation-to-algebraic-geometry",
+      "why": "Recent item from the user's Archive favorites list.",
+      "identifier": "isbn_9780387989808",
+      "details_url": "https://archive.org/details/isbn_9780387989808",
+      "metadata_url": "https://archive.org/metadata/isbn_9780387989808",
+      "expected_state": "metadata",
+      "title_contains": "algebraic geometry",
+      "minimum_files": 1
+    },
+    {
+      "name": "favorite-farm-drainage",
+      "why": "Recent public-domain item from the user's Archive favorites list.",
+      "identifier": "farmdrainage00fren",
+      "details_url": "https://archive.org/details/farmdrainage00fren",
+      "metadata_url": "https://archive.org/metadata/farmdrainage00fren",
+      "expected_state": "metadata",
+      "minimum_files": 1
+    },
+    {
+      "name": "favorite-durer-measurement",
+      "why": "Item from the user's Archive favorites list.",
+      "identifier": "albrechtdrersun01peltgoog",
+      "details_url": "https://archive.org/details/albrechtdrersun01peltgoog",
+      "metadata_url": "https://archive.org/metadata/albrechtdrersun01peltgoog",
+      "expected_state": "metadata",
+      "minimum_files": 1
+    },
+    {
+      "name": "favorite-philosophical-magazine-1924",
+      "why": "Item from the user's Archive favorites list.",
+      "identifier": "philosophical-magazine-vol-47-1924",
+      "details_url": "https://archive.org/details/philosophical-magazine-vol-47-1924",
+      "metadata_url": "https://archive.org/metadata/philosophical-magazine-vol-47-1924",
+      "expected_state": "metadata",
+      "minimum_files": 1
+    },
+    {
+      "name": "favorite-absolute-differential-calculus",
+      "why": "Item from the user's Archive favorites list.",
+      "identifier": "TheAbsoluteDifferentialCalculus",
+      "details_url": "https://archive.org/details/TheAbsoluteDifferentialCalculus",
+      "metadata_url": "https://archive.org/metadata/TheAbsoluteDifferentialCalculus",
+      "expected_state": "metadata",
+      "minimum_files": 1
+    },
+    {
+      "name": "favorite-new-geometry-of-space",
+      "why": "Item from the user's Archive favorites list.",
+      "identifier": "philtrans04968378",
+      "details_url": "https://archive.org/details/philtrans04968378",
+      "metadata_url": "https://archive.org/metadata/philtrans04968378",
+      "expected_state": "metadata",
+      "minimum_files": 1
+    },
+    {
+      "name": "upstream-nasa-control",
+      "why": "Control item used by the original jjjake internetarchive documentation.",
+      "identifier": "nasa",
+      "details_url": "https://archive.org/details/nasa",
+      "metadata_url": "https://archive.org/metadata/nasa",
+      "expected_state": "metadata",
+      "minimum_files": 1
+    }
+  ],
+  "searches": []
+}

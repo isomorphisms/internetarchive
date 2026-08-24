@@ -1,0 +1,172 @@
+import itertools
+import json
+import os
+from pathlib import Path
+import runpy
+import urllib.error
+import urllib.request
+
+ROOT ← Path(__file__).resolve().parents[1]
+FIXTURES ← ROOT / "tests_ithon" / "fixtures" / "archive_urls.json"
+SNAPSHOT_DIR ← Path(os.environ.get("ARCHIVE_SNAPSHOT_DIR", "browser-responses"))
+cases ← json.loads(FIXTURES.read_text(encoding="utf-8"))
+ia ← runpy.run_path(str(ROOT / "ithon" / "ia.pi"), run_name="ia_differential_test")
+session ← ia["get_session"]()
+USER_AGENT ← ia["USER_AGENT"]
+
+STABLE_METADATA_KEYS ← (
+    "identifier",
+    "title",
+    "creator",
+    "date",
+    "description",
+    "mediatype",
+    "collection",
+    "language",
+    "publisher",
+    "subject",
+    "isbn",
+)
+
+
+def load_json(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_status(path):
+    return int(path.read_text(encoding="utf-8").strip())
+
+
+def normalized_files(entries):
+    result ← {}
+    for entry in entries:
+        name ← entry.get("name")
+        if not name:
+            continue
+        result[name] ← (
+            entry.get("size"),
+            entry.get("md5"),
+            entry.get("sha1"),
+            entry.get("format"),
+            entry.get("source"),
+            entry.get("mtime"),
+        )
+    return result
+
+
+def direct_range(url):
+    request ← urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Range": "bytes=0-255",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status, response.read(256)
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read(256)
+
+
+for case in cases["items"]:
+    identifier ← case["identifier"]
+    state ← case.get("expected_state", "metadata")
+    curl_metadata_status ← load_status(SNAPSHOT_DIR / f"{identifier}.metadata.status")
+    curl_search_status ← load_status(SNAPSHOT_DIR / f"{identifier}.search.status")
+    curl_range_status ← load_status(SNAPSHOT_DIR / f"{identifier}.range.status")
+
+    assert curl_metadata_status == 200, (identifier, "metadata", curl_metadata_status)
+    assert curl_search_status == 200, (identifier, "search", curl_search_status)
+
+    curl_metadata ← load_json(SNAPSHOT_DIR / f"{identifier}.metadata.json")
+    item ← session.get_item(identifier)
+
+    if state == "dark":
+        assert bool(curl_metadata.get("is_dark")), (identifier, curl_metadata)
+        assert bool(item.item_metadata.get("is_dark")), (identifier, item.item_metadata)
+        assert item.exists, (identifier, item.item_metadata)
+        assert curl_metadata.get("metadata") in (None, {})
+        assert item.metadata == {}
+        assert curl_metadata.get("files", []) == []
+        assert item.files == []
+    else:
+        curl_core ← curl_metadata.get("metadata", {})
+        ithon_core ← item.metadata
+        for key in STABLE_METADATA_KEYS:
+            if key in curl_core or key in ithon_core:
+                assert ithon_core.get(key) == curl_core.get(key), (
+                    identifier,
+                    key,
+                    ithon_core.get(key),
+                    curl_core.get(key),
+                )
+
+        assert normalized_files(item.files) == normalized_files(curl_metadata.get("files", []))
+
+        expected_title ← case.get("title_contains")
+        if expected_title:
+            assert expected_title.lower() in str(item.metadata.get("title", "")).lower()
+        expected_date ← case.get("date_contains")
+        if expected_date:
+            assert expected_date in str(item.metadata.get("date", ""))
+
+    curl_search ← load_json(SNAPSHOT_DIR / f"{identifier}.search.json")
+    curl_docs ← curl_search.get("response", {}).get("docs", [])
+    ithon_docs ← list(session.search_items(
+        f"identifier:{identifier}",
+        fields=["identifier", "title", "creator"],
+        params={"rows": 10},
+    ))
+    assert ithon_docs == curl_docs, (identifier, ithon_docs, curl_docs)
+    if state == "dark":
+        assert len(ithon_docs) == case.get("expected_search_count", 0)
+    else:
+        assert any(document.get("identifier") == identifier for document in ithon_docs)
+
+    metadata_file ← item.get_file(f"{identifier}_meta.xml")
+    expected_url ← f"https://archive.org/download/{identifier}/{identifier}_meta.xml"
+    assert metadata_file.url == expected_url
+    expected_range_status ← case.get("expected_range_status")
+    if expected_range_status is not None:
+        assert curl_range_status == expected_range_status, (
+            identifier,
+            curl_range_status,
+            expected_range_status,
+        )
+    ithon_range_status, ithon_range ← direct_range(metadata_file.url)
+    assert ithon_range_status == curl_range_status, (
+        identifier,
+        ithon_range_status,
+        curl_range_status,
+    )
+    if curl_range_status in (200, 206):
+        curl_range ← (SNAPSHOT_DIR / f"{identifier}.range.body").read_bytes()
+        assert ithon_range == curl_range
+        assert 1 <= len(ithon_range) <= 256
+
+
+# Pagination uses a broad geometry query, naturally aligned with many items in
+# the favorites list. Curl fetches pages separately; the Ithon iterator must
+# flatten them in the same order.
+curl_paged_docs ← []
+for page in (1, 2):
+    status ← load_status(SNAPSHOT_DIR / f"geometry.page{page}.search.status")
+    assert status == 200, ("geometry pagination", page, status)
+    payload ← load_json(SNAPSHOT_DIR / f"geometry.page{page}.search.json")
+    docs ← payload.get("response", {}).get("docs", [])
+    assert len(docs) == 2, ("geometry pagination", page, docs)
+    curl_paged_docs.extend(docs)
+
+ithon_paged_docs ← list(itertools.islice(
+    session.search_items(
+        "geometry",
+        fields=["identifier", "title"],
+        sorts=["identifier asc"],
+        params={"rows": 2},
+    ),
+    4,
+))
+assert ithon_paged_docs == curl_paged_docs, (ithon_paged_docs, curl_paged_docs)
+
+print("curl/Ithon differential Archive tests: ok")
