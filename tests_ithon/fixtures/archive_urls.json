@@ -1,41 +1,57 @@
 {
   "items": [
     {
-      "name": "hegel-myths-and-legends",
-      "why": "Exact Internet Archive item previously supplied by the user.",
-      "identifier": "hegelmythslegend0000unse",
-      "details_url": "https://archive.org/details/hegelmythslegend0000unse",
-      "metadata_url": "https://archive.org/metadata/hegelmythslegend0000unse",
+      "name": "favorite-invitation-to-algebraic-geometry",
+      "why": "Recent item from the user's Archive favorites list.",
+      "identifier": "isbn_9780387989808",
+      "details_url": "https://archive.org/details/isbn_9780387989808",
+      "metadata_url": "https://archive.org/metadata/isbn_9780387989808",
       "expected_state": "metadata",
-      "title_contains": "Hegel",
-      "date_contains": "1996",
-      "minimum_files": 1,
-      "expected_range_status": 206
+      "title_contains": "algebraic geometry",
+      "minimum_files": 1
     },
     {
-      "name": "jstor-108997",
-      "why": "Exact Internet Archive JSTOR item previously used by the user; the user supplied its 108997.pdf download URL.",
-      "identifier": "jstor-108997",
-      "details_url": "https://archive.org/details/jstor-108997",
-      "metadata_url": "https://archive.org/metadata/jstor-108997",
+      "name": "favorite-farm-drainage",
+      "why": "Recent public-domain item from the user's Archive favorites list.",
+      "identifier": "farmdrainage00fren",
+      "details_url": "https://archive.org/details/farmdrainage00fren",
+      "metadata_url": "https://archive.org/metadata/farmdrainage00fren",
       "expected_state": "metadata",
       "minimum_files": 1
     },
     {
-      "name": "cayley-collected-mathematical-papers-volume-6",
-      "why": "Exact Internet Archive item previously used by the user.",
-      "identifier": "collectedmathema06cayluoft",
-      "details_url": "https://archive.org/details/collectedmathema06cayluoft",
-      "metadata_url": "https://archive.org/metadata/collectedmathema06cayluoft",
+      "name": "favorite-durer-measurement",
+      "why": "Item from the user's Archive favorites list.",
+      "identifier": "albrechtdrersun01peltgoog",
+      "details_url": "https://archive.org/details/albrechtdrersun01peltgoog",
+      "metadata_url": "https://archive.org/metadata/albrechtdrersun01peltgoog",
       "expected_state": "metadata",
       "minimum_files": 1
     },
     {
-      "name": "noveltoons-collection",
-      "why": "Exact Internet Archive collection previously used by the user.",
-      "identifier": "noveltoons-collection",
-      "details_url": "https://archive.org/details/noveltoons-collection",
-      "metadata_url": "https://archive.org/metadata/noveltoons-collection",
+      "name": "favorite-philosophical-magazine-1924",
+      "why": "Item from the user's Archive favorites list.",
+      "identifier": "philosophical-magazine-vol-47-1924",
+      "details_url": "https://archive.org/details/philosophical-magazine-vol-47-1924",
+      "metadata_url": "https://archive.org/metadata/philosophical-magazine-vol-47-1924",
+      "expected_state": "metadata",
+      "minimum_files": 1
+    },
+    {
+      "name": "favorite-absolute-differential-calculus",
+      "why": "Item from the user's Archive favorites list.",
+      "identifier": "TheAbsoluteDifferentialCalculus",
+      "details_url": "https://archive.org/details/TheAbsoluteDifferentialCalculus",
+      "metadata_url": "https://archive.org/metadata/TheAbsoluteDifferentialCalculus",
+      "expected_state": "metadata",
+      "minimum_files": 1
+    },
+    {
+      "name": "favorite-new-geometry-of-space",
+      "why": "Item from the user's Archive favorites list.",
+      "identifier": "philtrans04968378",
+      "details_url": "https://archive.org/details/philtrans04968378",
+      "metadata_url": "https://archive.org/metadata/philtrans04968378",
       "expected_state": "metadata",
       "minimum_files": 1
     },
@@ -49,13 +65,5 @@
       "minimum_files": 1
     }
   ],
-  "searches": [
-    {
-      "name": "isomorphisms-uploader-probe",
-      "why": "Public-handle probe only; Archive's bookmarks API confirms that `isomorphisms` is not the user's Archive screenname.",
-      "query": "uploader:isomorphisms",
-      "url": "https://archive.org/advancedsearch.php?q=uploader%3Aisomorphisms&fl%5B%5D=identifier&fl%5B%5D=title&rows=10&page=1&output=json",
-      "allow_empty": true
-    }
-  ]
+  "searches": []
 }
