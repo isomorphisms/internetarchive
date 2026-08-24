@@ -1,16 +1,16 @@
-name: Snapshot isomorphisms Archive favorites
+name: Snapshot isomorphismes Archive favorites
 
 on:
   push:
     branches:
       - ithon-rewrite
-  pull_request:
-    branches:
-      - master
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 concurrency:
-  group: snapshot-isomorphisms-favorites-${{ github.ref }}
+  group: snapshot-isomorphismes-favorites-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -18,12 +18,73 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ithon-rewrite
 
-      - name: Capture favorites collection surfaces
+      - name: Capture Archive favorites
         run: sh tests_ithon/capture_favorites_sources.sh favorites-sources
 
-      - name: Preserve favorites sources
+      - name: Write canonical JSON and Markdown
+        run: |
+          mkdir -p tests_ithon/fixtures
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          source = Path('favorites-sources/isomorphismes.bookmarks.json')
+          favorites = json.loads(source.read_text(encoding='utf-8'))
+
+          assert favorites, 'favorites list is empty'
+          assert all(row.get('userid') == '@isomorphismes' for row in favorites)
+          assert all(row.get('kind') == 'favorite' for row in favorites)
+          assert all(row.get('listname') == 'fav-isomorphismes' for row in favorites)
+
+          json_path = Path('tests_ithon/fixtures/isomorphismes_favorites.json')
+          json_path.write_text(
+              json.dumps(favorites, ensure_ascii=False, indent=2) + '\n',
+              encoding='utf-8',
+          )
+
+          lines = [
+              '# isomorphismes Internet Archive favorites',
+              '',
+              'Canonical favorites snapshot for Internet Archive screenname `isomorphismes`.',
+              '',
+              f'Favorites in snapshot: **{len(favorites)}**',
+              '',
+              '| Added / updated | Item | Identifier | Type |',
+              '| --- | --- | --- | --- |',
+          ]
+          for row in favorites:
+              identifier = str(row.get('identifier', ''))
+              title = str(row.get('title') or identifier).replace('|', '\\|').replace('\n', ' ')
+              updated = str(row.get('updatedate', '')).replace('|', '\\|')
+              mediatype = str(row.get('mediatype', '')).replace('|', '\\|')
+              lines.append(
+                  f'| {updated} | [{title}](https://archive.org/details/{identifier}) | '
+                  f'`{identifier}` | {mediatype} |'
+              )
+
+          Path('tests_ithon/ISOMORPHISMS_FAVORITES.md').write_text(
+              '\n'.join(lines) + '\n', encoding='utf-8'
+          )
+          print('favorites:', len(favorites))
+          PY
+
+      - name: Preserve raw Archive responses
         uses: actions/upload-artifact@v4
         with:
-          name: isomorphisms-favorites-sources
+          name: isomorphismes-favorites-sources
           path: favorites-sources
+
+      - name: Commit changed favorites snapshot
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add tests_ithon/fixtures/isomorphismes_favorites.json tests_ithon/ISOMORPHISMS_FAVORITES.md
+          if git diff --cached --quiet; then
+            echo 'favorites snapshot unchanged'
+            exit 0
+          fi
+          git commit -m 'Refresh isomorphismes Archive favorites'
+          git push origin HEAD:ithon-rewrite
