@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
 #
 # The internetarchive module is a Python/CLI interface to Archive.org.
 #
-# Copyright (C) 2012-2017 Internet Archive
+# Copyright (C) 2012-2026 Internet Archive
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -30,62 +29,61 @@ Usage::
     >>> item.exists
     True
 
-:copyright: (C) 2012-2017 by Internet Archive.
+:copyright: (C) 2012-2024 by Internet Archive.
 :license: AGPL 3, see LICENSE for more details.
 """
 
-from __future__ import absolute_import
-
 __title__ = 'internetarchive'
-__version__ = '1.8.2.dev1'
 __author__ = 'Jacob M. Johnson'
 __license__ = 'AGPL 3'
-__copyright__ = 'Copyright (C) 2012-2017 Internet Archive'
+__copyright__ = 'Copyright (C) 2012-2026 Internet Archive'
 
-from internetarchive.item import Item
-from internetarchive.files import File
-from internetarchive.search import Search
+from .__version__ import __version__  # isort:skip
+from internetarchive.api import (
+    configure,
+    delete,
+    download,
+    get_files,
+    get_item,
+    get_session,
+    get_tasks,
+    get_user_info,
+    get_username,
+    modify_metadata,
+    search_items,
+    upload,
+)
 from internetarchive.catalog import Catalog
+from internetarchive.files import File
+from internetarchive.item import Item
+from internetarchive.search import Search
 from internetarchive.session import ArchiveSession
-from internetarchive.api import get_item, get_files, modify_metadata, upload, \
-    download, delete, get_tasks, search_items, get_session, configure, get_username, \
-    get_user_info
-
 
 __all__ = [
-    '__version__',
-
     # Classes.
     'ArchiveSession',
-    'Item',
-    'File',
-    'Search',
     'Catalog',
-
+    'File',
+    'Item',
+    'Search',
+    '__version__',
+    'configure',
+    'delete',
+    'download',
+    'get_files',
     # API.
     'get_item',
-    'get_files',
-    'modify_metadata',
-    'upload',
-    'download',
-    'delete',
-    'get_tasks',
-    'search_items',
     'get_session',
-    'configure',
+    'get_tasks',
     'get_username',
+    'modify_metadata',
+    'search_items',
+    'upload',
 ]
 
 
 # Set default logging handler to avoid "No handler found" warnings.
 import logging
-try:  # Python 2.7+
-    from logging import NullHandler
-except ImportError:
-    class NullHandler(logging.Handler):
-        def emit(self, record):
-            pass
-
 
 log = logging.getLogger(__name__)
-log.addHandler(NullHandler())
+log.addHandler(logging.NullHandler())

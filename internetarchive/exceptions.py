@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
 #
 # The internetarchive module is a Python/CLI interface to Archive.org.
 #
-# Copyright (C) 2012-2017 Internet Archive
+# Copyright (C) 2012-2026 Internet Archive
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -21,10 +20,40 @@
 internetarchive.exceptions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:copyright: (C) 2012-2017 by Internet Archive.
+:copyright: (C) 2012-2024 by Internet Archive.
 :license: AGPL 3, see LICENSE for more details.
 """
 
 
 class AuthenticationError(Exception):
     """Authentication Failed"""
+
+
+class ItemLocateError(Exception):
+    def __init__(self, *args, **kwargs):
+        default_message = "Item cannot be located because it is dark or does not exist."
+        if args or kwargs:
+            super().__init__(*args, **kwargs)
+        else:
+            super().__init__(default_message)
+
+
+class InvalidChecksumError(Exception):
+    def __init__(self, *args, **kwargs):
+        default_message = "File corrupt, checksums do not match."
+        if args or kwargs:
+            super().__init__(*args, **kwargs)
+        else:
+            super().__init__(default_message)
+
+
+class AccountAPIError(Exception):
+    """Base exception for Account API-related errors."""
+
+    def __init__(self, message: str, error_data: dict | None = None):
+        super().__init__(message)
+        self.error_data = error_data
+
+
+class DirectoryTraversalError(Exception):
+    """Raised when a computed local file path escapes the intended destination directory."""

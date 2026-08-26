@@ -1,125 +1,112 @@
-.. _install:
+.. _installation:
 
 Installation
 ============
 
+Recommended: Installing the ``ia`` CLI with ``pipx``
+----------------------------------------------------
 
-System-Wide Installation
-------------------------
+If your primary goal is to use the ``ia`` **command-line tool**, the recommended approach is to install it with ``pipx``. This keeps the CLI isolated from your system Python while making the ``ia`` command available globally.
 
-Installing the ``internetarchive`` library globally on your system can be done with `pip <http://www.pip-installer.org/>`_.
-This is the recommended method for installing ``internetarchive`` (`see below <installation.html#installing-pip>`_ for details on installing pip)::
-    
-    $ sudo pip install internetarchive
+Using ``pipx`` ensures the CLI is isolated, easy to upgrade, and globally accessible.
 
-or, with `easy_install <http://pypi.python.org/pypi/setuptools>`_::
+.. note::
 
-    $ sudo easy_install internetarchive
+   If you just want to try out the ``ia`` CLI without installing anything, you can use the prebuilt binary instead. See the :ref:`binaries` section below for details.
 
-Either of these commands will install the ``internetarchive`` Python library and ``ia`` command-line tool on your system.
+**Prerequisite:** Make sure you have ``pipx`` installed. For installation instructions, see the `pipx installation guide <https://pipx.pypa.io/stable/installation/>`_.
 
-**Note**: Some versions of Mac OS X come with Python libraries that are required by ``internetarchive`` (e.g. the Python package ``six``).
-This can cause installation issues. If your installation is failing with a message that looks something like::
+1. Install ``internetarchive`` using ``pipx``:
 
-    OSError: [Errno 1] Operation not permitted: '/var/folders/bk/3wx7qs8d0x79tqbmcdmsk1040000gp/T/pip-TGyjVo-uninstall/System/Library/Frameworks/Python.framework/Versions/2.7/Extras/lib/python/six-1.4.1-py2.7.egg-info'
+   .. code-block:: console
 
-You can use the ``--ignore-installed`` parameter in ``pip`` to ignore the libraries that are already installed, and continue with the rest of the installation::
+       pipx install internetarchive
 
-    $ sudo pip install --ignore-installed internetarchive
+2. Verify the installation:
 
-More details on this issue can be found here: https://github.com/pypa/pip/issues/3165
+   .. code-block:: console
 
-Installing Pip
-~~~~~~~~~~~~~~
+       ia --version
 
-The easiest way to install ``pip`` is probably using your operating systems package manager.
+   This should display the installed version of the ``ia`` CLI.
 
-Mac OS, with `homebrew <https://brew.sh/>`_::
+Troubleshooting ``pipx`` Installation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-    $ brew install pip
+- **Permission errors**: Avoid using ``sudo`` with ``pipx``. It is designed to work without elevated permissions.
+- **Command not found**: If ``ia`` is not recognized, restart your terminal or run:
 
-Ubuntu, with `apt-get <https://help.ubuntu.com/community/AptGet/Howto>`_::
+.. code-block:: console
 
-    $ sudo apt-get install python-pip
+    pipx ensurepath
 
-If your OS doesn't have a package manager, you can also `install pip with get-pip.py <https://pip.pypa.io/en/stable/installing/>`_::
+- **Python version issues**: Ensure you are using Python 3.10 or later.
 
-    $ curl -LOs https://bootstrap.pypa.io/get-pip.py
-    $ python get-pip.py
+For more details, refer to the `pipx documentation <https://pipx.pypa.io/stable/>`_.
 
+Installing for Python Scripts (using a virtual environment)
+-----------------------------------------------------------
 
-virtualenv
-----------
+If you want to import ``internetarchive`` in your Python scripts (for programmatic access), the recommended approach is to use a virtual environment:
 
-If you don't want to, or can't, install the package system-wide you can use ``virtualenv`` to create an isolated Python environment.
+.. code-block:: console
 
-First, make sure ``virtualenv`` is installed on your system. If it's not, you can do so with pip::
+    python -m venv venv
+    source venv/bin/activate
+    pip install --upgrade pip
+    pip install internetarchive
 
-    $ sudo pip install virtualenv
+After this, you can use the library in Python:
 
-With ``easy_install``::
+.. code-block:: python
 
-    $ sudo easy_install virtualenv
+    from internetarchive import get_item
 
-Or your systems package manager, ``apt-get`` for example::
+    item = get_item("nasa")
+    print(item.metadata)
 
-    $ sudo apt-get install python-virtualenv
+.. _binaries:
 
-Once you have ``virtualenv`` installed on your system, create a virtualenv::
+Using ``ia`` Binaries
+---------------------
 
-    $ mkdir myproject
-    $ cd myproject
-    $ virtualenv venv
-    New python executable in venv/bin/python
-    Installing setuptools, pip............done.
+The easiest way to start using ``ia`` is downloading a binary.
+The only requirements of the binary are a Unix-like environment with Python installed.
+To download the latest binary, and make it executable simply run the following commands:
 
-Activate your virtualenv::
+.. code-block:: console
 
-    $ . venv/bin/activate
+    curl -LOs https://archive.org/download/ia-pex/ia
+    chmod +x ia
 
-Install ``internetarchive`` into your virtualenv::
+Binaries are generated with `PEX <https://github.com/pantsbuild/pex>`_. The only requirement for using the binaries is that you have a `supported version of Python <https://devguide.python.org/versions/>`_ installed on a Unix-like operating system.
 
-    $ pip install internetarchive
+For more details on the command-line interface please refer to the `README <https://github.com/jjjake/internetarchive/blob/master/README.rst>`_, or run ``ia help``.
 
-Snap
-----
+.. _updating:
 
-You can install the latest ``ia`` `snap <https://snapcraft.io>`_, and help testing the most recent changes of the master branch in `all the supported Linux distros <https://snapcraft.io/docs/core/install>`_ with::
-
-    $ sudo snap install ia --edge
-
-Every time a new version of ``ia`` is pushed to the store, you will get it updated automatically.
-
-Binaries
+Updating
 --------
 
-Binaries are also available for the ``ia`` command-line tool::
+The method for updating depends on how you originally installed:
 
-    $ curl -LOs https://archive.org/download/ia-pex/ia
-    $ chmod +x ia
+**If you installed** ``ia`` **with pipx** (CLI):
 
-Binaries are generated with `PEX <https://github.com/pantsbuild/pex>`_. The only requirement for using the binaries is that you have Python installed on a Unix-like operating system.
+.. code-block:: console
 
-For more details on the command-line interface please refer to the `README <https://github.com/jjjake/internetarchive/blob/master/README.rst>`_, or ``ia help``.
+    pipx upgrade internetarchive
 
+**If you installed** ``internetarchive`` **in a virtual environment (Python library)**, activate your virtual environment, then:
 
-Get the Code
-------------
+.. code-block:: console
 
-Internetarchive is `actively developed on GitHub <https://github.com/jjjake/internetarchive>`_.
+    pip install --upgrade internetarchive
 
-You can either clone the public repository::
+**If you are using the binary**, simply download the latest binary again with the same steps as above:
 
-    $ git clone git://github.com/jjjake/internetarchive.git
+.. code-block:: console
 
-Download the `tarball <https://github.com/jjjake/internetarchive/tarball/master>`_::
+    curl -LOs https://archive.org/download/ia-pex/ia
+    chmod +x ia
 
-    $ curl -OL https://github.com/jjjake/internetarchive/tarball/master
-
-Or, download the `zipball <https://github.com/jjjake/internetarchive/zipball/master>`_::
-
-    $ curl -OL https://github.com/jjjake/internetarchive/zipball/master
-
-Once you have a copy of the source, you can install it into your site-packages easily::
-
-    $ python setup.py install
+For more information about recent changes, see :ref:`updates`.

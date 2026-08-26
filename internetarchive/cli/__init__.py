@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
 #
 # The internetarchive module is a Python/CLI interface to Archive.org.
 #
-# Copyright (C) 2012-2016 Internet Archive
+# Copyright (C) 2012-2026 Internet Archive
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -21,22 +20,40 @@
 internetarchive.cli
 ~~~~~~~~~~~~~~~~~~~
 
-:copyright: (C) 2012-2016 by Internet Archive.
+:copyright: (C) 2012-2024 by Internet Archive.
 :license: AGPL 3, see LICENSE for more details.
 """
-from internetarchive.cli import ia, ia_configure, ia_delete, ia_download, ia_list, \
-    ia_metadata, ia_search, ia_tasks, ia_upload, argparser
 
+from internetarchive.cli import (
+    cli_utils,
+    ia,
+    ia_account,
+    ia_configure,
+    ia_copy,
+    ia_delete,
+    ia_download,
+    ia_list,
+    ia_metadata,
+    ia_move,
+    ia_reviews,
+    ia_search,
+    ia_tasks,
+    ia_upload,
+)
 
 __all__ = [
-    'ia',
-    'ia_configure',
-    'ia_delete',
-    'ia_download',
-    'ia_list',
-    'ia_metadata',
-    'ia_search',
-    'ia_tasks',
-    'ia_upload',
-    'argparser',
+    "cli_utils",
+    "ia",
+    "ia_account",
+    "ia_configure",
+    "ia_copy",
+    "ia_delete",
+    "ia_download",
+    "ia_list",
+    "ia_metadata",
+    "ia_move",
+    "ia_reviews",
+    "ia_search",
+    "ia_tasks",
+    "ia_upload",
 ]

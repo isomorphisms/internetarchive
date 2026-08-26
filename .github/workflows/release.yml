@@ -1,0 +1,148 @@
+# Tag-triggered release: push a v* tag (via `make release RELEASE=X.Y.Z`) and this
+# workflow tests, builds the sdist/wheel and pex, publishes to PyPI via Trusted
+# Publishing (OIDC — no stored token), and creates the GitHub release with the
+# curated HISTORY.rst notes and the pex attached.
+#
+# Prerequisites (one-time, repo/PyPI settings):
+#   - PyPI trusted publisher: owner jjjake, repo internetarchive,
+#     workflow release.yml, environment pypi.
+#   - GitHub environment `pypi` (optionally with a required reviewer).
+#
+# The pex upload to the archive.org `ia-pex` item stays manual (`make
+# publish-binary`) — it needs IA credentials we don't keep in CI.
+# `make publish` remains as a documented laptop fallback.
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # hatch-vcs reads the version from git tags
+      - uses: actions/setup-python@v7
+        with:
+          python-version: 3.x
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - run: uv pip install --system .[test]
+      - run: pytest -m "not network"
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # hatch-vcs reads the version from git tags
+      - uses: actions/setup-python@v7
+        with:
+          python-version: 3.x
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - run: uv build
+      - run: uv pip install --system twine packaging
+      # The version now comes from the tag via hatch-vcs, so a mismatch is not
+      # possible in the way it used to be. What is possible is a checkout with
+      # no tags (shallow clone), which silently yields a 0.1.dev1 build --
+      # assert the artifact names carry the tag so that fails loudly here.
+      #
+      # Artifact filenames use the PEP 440 normalized form, which is not always
+      # the tag with `v` stripped: v5.99.0-rc1 builds 5.99.0rc1. Normalize the
+      # tag the same way before comparing.
+      - name: Verify built artifacts match the tag
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          VERSION=$(python -c "import sys; from packaging.version import Version; print(Version(sys.argv[1]))" "$TAG_VERSION")
+          echo "tag $GITHUB_REF_NAME -> normalized $VERSION"
+          for f in "dist/internetarchive-${VERSION}.tar.gz" \
+                   "dist/internetarchive-${VERSION}-py3-none-any.whl"; do
+            if [ ! -f "$f" ]; then
+              echo "Expected $f, but the build produced:" >&2
+              ls -1 dist >&2
+              exit 1
+            fi
+          done
+          case "$VERSION" in
+            *dev*) echo "Refusing to release a dev version: $VERSION" >&2; exit 1 ;;
+          esac
+      - run: twine check dist/*
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  pex:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # hatch-vcs reads the version from git tags
+      - uses: actions/setup-python@v7
+        with:
+          python-version: 3.x
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - run: uv pip install --system pex
+      - run: make test-binary  # builds the pex (via `binary`) and smoke-tests it
+      - name: Generate sha256 checksum
+        run: sha256sum ia-*.pex > ia-pex.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pex
+          path: |
+            ia-*.pex
+            ia-pex.sha256
+
+  publish-pypi:
+    runs-on: ubuntu-latest
+    needs: [build, pex]
+    environment:
+      name: pypi
+      url: https://pypi.org/project/internetarchive/
+    permissions:
+      id-token: write  # required for PyPI Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    runs-on: ubuntu-latest
+    needs: publish-pypi
+    permissions:
+      contents: write  # create the release and upload assets
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: pex
+      - name: Extract curated notes from HISTORY.rst
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v ver="$VERSION" '$0 ~ "^"ver" "{found=1; next} found && /^\++$/{next} found && /^[0-9]+\.[0-9]+\.[0-9]+ /{exit} found' HISTORY.rst \
+            | sed 's/``/`/g' > release-notes.md
+          test -s release-notes.md || {
+            echo "Error: extracted release notes are empty -- check the '$VERSION' heading in HISTORY.rst" >&2
+            exit 1
+          }
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Version ${GITHUB_REF_NAME#v}" \
+            --notes-file release-notes.md \
+            --generate-notes \
+            ia-*.pex ia-pex.sha256

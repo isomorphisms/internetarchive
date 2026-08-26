@@ -1,0 +1,127 @@
+# AGENTS.md
+
+Guidance for coding agents (Claude Code, Codex, etc.) working in this repository.
+`CLAUDE.md` is a symlink to this file.
+
+## Project Overview
+
+Python library and `ia` CLI for interacting with archive.org. Used for uploading, downloading, searching, and managing items and their metadata. Also provides catalog task management and account administration utilities. Items are identified by a unique identifier and contain files and metadata.
+
+## Common Commands
+
+```bash
+# Install for development (includes linting, tests, type-checking, and docs tooling)
+pip install -e '.[all]'
+
+# Run tests
+pytest
+
+# Run tests with linting and format checking (what CI runs)
+ruff check && ruff format --check && pytest
+
+# Run a single test file
+pytest tests/test_api.py
+
+# Run a specific test
+pytest tests/test_api.py::test_get_item
+
+# Multi-version testing (requires Python 3.10-3.14 installed)
+tox
+
+# Lint only
+ruff check
+
+# Build docs
+pip install -r docs/requirements.txt
+cd docs && make html
+```
+
+## Architecture
+
+The library has a three-layer architecture:
+
+**Layer 1 - Public API (`internetarchive/api.py`)**
+Convenience functions that wrap the core classes: `get_item()`, `search_items()`, `upload()`, `download()`, `modify_metadata()`, `delete()`, `configure()`, `get_session()`.
+
+**Layer 2 - Core Classes**
+- `ArchiveSession` (`session.py`) - Extends `requests.Session`. Manages config, credentials, HTTP headers, connection pooling.
+- `Item` (`item.py`) - Represents an Archive.org item. Contains files, metadata, and methods for download/upload/modify.
+- `File` (`files.py`) - Represents a single file within an item. Handles download, delete, checksum verification.
+- `Search` (`search.py`) - Query interface with pagination and field selection.
+
+**Layer 3 - Supporting Modules**
+- `config.py` - INI-based configuration (credentials at `~/.config/internetarchive/ia.ini` or `~/.ia`)
+- `iarequest.py` - HTTP request builders (`MetadataRequest`, `S3Request`)
+- `auth.py` - S3 authentication handlers
+- `catalog.py` - Catalog task management
+
+**CLI (`internetarchive/cli/`)**
+- Entry point: `ia.py:main()` → registered as `ia` console script
+- Subcommands: `ia_download.py`, `ia_upload.py`, `ia_metadata.py`, `ia_search.py`, `ia_list.py`, `ia_delete.py`, `ia_copy.py`, `ia_move.py`, `ia_tasks.py`, `ia_configure.py`, etc.
+
+## Code Style
+
+- Line length: 88 characters (configured in `pyproject.toml`)
+- Linter: ruff (configured in `pyproject.toml`)
+- Formatter: `ruff format` (quote style and line length configured in `pyproject.toml`; enforced in CI)
+- Type checking: mypy (configured in `pyproject.toml`; type stubs in the `types` extra)
+- Docstrings: Always add or update docstrings when editing or adding code. Use Sphinx-style format with `:param:`, `:returns:`, and `:raises:` sections
+
+## Key Dependencies
+
+- `requests` - HTTP client
+- `jsonpatch` - JSON patching for metadata updates
+- `tqdm` - Progress bars
+- `responses` - HTTP mocking for tests
+
+## Contributing Notes
+
+- All new features should be developed on a feature branch, not directly on master
+- PRs require tests and must pass ruff linting
+- New features must include documentation updates (see `docs/source/`)
+- Avoid introducing new dependencies
+- Support Python 3.10+
+
+## Git Workflow
+
+- `master` is protected by GitHub rulesets — never push directly
+- Always create feature branches and open PRs
+- Required CI checks must pass before merge (per the `main-protection` ruleset, verified
+  2026-08-19): `lint_python`, `pre-commit`, and each `tox` matrix leg by name — `tox (3.10)`
+  through `tox (3.14)` and `tox (pypy-3.11)`. `install_internetarchive` and `docs` run on every
+  PR but are **not** required.
+- Because each `tox` leg is required by name, changing the `tox.yml` matrix breaks branch
+  protection until the ruleset is updated.
+
+## Versioning
+
+The version is derived from the git tag by hatch-vcs (`[tool.hatch.version] source = "vcs"`
+in `pyproject.toml`). Nothing in the tree stores a version string:
+`internetarchive/__version__.py` is a shim over the build-time-generated
+`internetarchive/_version.py`, which is gitignored.
+
+Do not add a version string back to the repo, and do not open version-bump PRs. Between
+tags the version resolves to the next patch with a `.devN` suffix (e.g. `5.11.2.dev1`
+one commit after `v5.11.1`), which is what the old manual dev-bump policy was
+approximating by hand.
+
+Because the version comes from tags, any workflow or local build that needs a correct
+version must check out with full history (`fetch-depth: 0`); a shallow clone silently
+produces `0.1.dev1`.
+
+## Releasing
+
+`master` is branch-protected, so a release is three steps: (1) date the `HISTORY.rst`
+section via a PR (`make prepare-history RELEASE=X.Y.Z`), (2) `make release RELEASE=X.Y.Z`
+to validate and push the tag — the tag-triggered `release` workflow tests, builds the
+sdist/wheel and pex, publishes to PyPI via Trusted Publishing (OIDC), and creates the
+GitHub release with the pex attached — then (3) `make publish-binary` to upload the pex
+to the archive.org `ia-pex` item (CI has no IA credentials).
+`make publish RELEASE=X.Y.Z` remains a laptop fallback when the workflow is unavailable.
+
+Full steps are in the **Releasing** section of `CONTRIBUTING.rst`.
+
+## Related
+
+- [internet-archive-skills](https://github.com/internetarchive/internet-archive-skills) — AI-facing documentation for the `ia` CLI and Python library. Consult when working on upload, metadata, item creation, or search logic — it documents Archive.org platform constraints (item size/file limits, metadata schema, identifier rules, rate limiting). Update if CLI or API interfaces change.
+- Latest skill docs: https://raw.githubusercontent.com/internetarchive/internet-archive-skills/main/SKILL.md

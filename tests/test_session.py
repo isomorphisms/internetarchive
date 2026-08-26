@@ -1,12 +1,10 @@
 import os
 
-from tests.conftest import NASA_METADATA_PATH, PROTOCOL, IaRequestsMock
-
 import responses
 
 import internetarchive.session
 from internetarchive import __version__
-
+from tests.conftest import NASA_METADATA_PATH, PROTOCOL, IaRequestsMock
 
 CONFIG = {
     's3': {
@@ -14,8 +12,8 @@ CONFIG = {
         'secret': 'test_secret',
     },
     'cookies': {
-        'logged-in-user': 'test%40example.com',
-        'logged-in-sig': 'testsig',
+        'logged-in-user': 'test%40example.com; path=/; domain=.archive.org',
+        'logged-in-sig': 'testsig; path=/; domain=.archive.org',
     },
     'logging': {
         'level': 'INFO',
@@ -27,28 +25,36 @@ CONFIG = {
 def test_archive_session(tmpdir):
     tmpdir.chdir()
 
-    s = internetarchive.session.ArchiveSession(CONFIG)
+    # Use an empty config file to avoid merging with user's real config
+    empty_config_file = str(tmpdir.join('empty_ia.ini'))
+    with open(empty_config_file, 'w'):
+        pass
+
+    s = internetarchive.session.ArchiveSession(CONFIG, config_file=empty_config_file)
     assert os.path.isfile('test.log')
 
     assert CONFIG == s.config
-    assert s.cookies == CONFIG['cookies']
+    assert set(s.cookies.keys()) == set(CONFIG['cookies'].keys())
     assert s.secure is True
     assert s.protocol == PROTOCOL
     assert s.access_key == 'test_access'
     assert s.secret_key == 'test_secret'
-    assert s.headers['user-agent'].startswith('internetarchive/{0}'.format(__version__))
+    assert s.headers['user-agent'].startswith(f'internetarchive/{__version__}')
 
 
 def test_get_item(tmpdir):
     tmpdir.chdir()
 
-    with open(NASA_METADATA_PATH, 'r') as fh:
+    with open(NASA_METADATA_PATH) as fh:
         item_metadata = fh.read().strip()
 
     with responses.RequestsMock() as rsps:
-        rsps.add(responses.GET, '{0}//archive.org/metadata/nasa'.format(PROTOCOL),
-                 body=item_metadata,
-                 content_type='application/json')
+        rsps.add(
+            responses.GET,
+            f'{PROTOCOL}//archive.org/metadata/nasa',
+            body=item_metadata,
+            content_type='application/json',
+        )
 
         s = internetarchive.session.ArchiveSession()
         item = s.get_item('nasa')
@@ -56,10 +62,13 @@ def test_get_item(tmpdir):
         assert item.identifier == 'nasa'
 
     with responses.RequestsMock() as rsps:
-        rsps.add(responses.GET, '{0}//archive.org/metadata/nasa'.format(PROTOCOL),
-                 body=item_metadata,
-                 status=400,
-                 content_type='application/json')
+        rsps.add(
+            responses.GET,
+            f'{PROTOCOL}//archive.org/metadata/nasa',
+            body=item_metadata,
+            status=400,
+            content_type='application/json',
+        )
 
         s = internetarchive.session.ArchiveSession(CONFIG)
         try:
@@ -88,9 +97,12 @@ def test_s3_is_overloaded():
     }"""
 
     with IaRequestsMock() as rsps:
-        rsps.add(responses.GET, '{0}//s3.us.archive.org'.format(PROTOCOL),
-                 body=test_body,
-                 content_type='application/json')
+        rsps.add(
+            responses.GET,
+            f'{PROTOCOL}//s3.us.archive.org',
+            body=test_body,
+            content_type='application/json',
+        )
         s = internetarchive.session.ArchiveSession(CONFIG)
         r = s.s3_is_overloaded('nasa')
         assert r is False
@@ -113,9 +125,103 @@ def test_s3_is_overloaded():
     }"""
 
     with responses.RequestsMock() as rsps:
-        rsps.add(responses.GET, '{0}//s3.us.archive.org'.format(PROTOCOL),
-                 body=test_body,
-                 content_type='application/json')
+        rsps.add(
+            responses.GET,
+            f'{PROTOCOL}//s3.us.archive.org',
+            body=test_body,
+            content_type='application/json',
+        )
         s = internetarchive.session.ArchiveSession(CONFIG)
         r = s.s3_is_overloaded('nasa')
         assert r is True
+
+
+def test_user_agent_suffix():
+    """Test that a custom user agent suffix is appended to the default UA."""
+    custom_suffix = 'MyCustomApp/1.0 (test bot)'
+    config = {
+        's3': {
+            'access': 'test_access',
+            'secret': 'test_secret',
+        },
+        'general': {
+            'user_agent_suffix': custom_suffix,
+        },
+    }
+    s = internetarchive.session.ArchiveSession(config)
+    # Verify the UA starts with the default and ends with the custom suffix
+    assert s.headers['User-Agent'].startswith(f'internetarchive/{__version__}')
+    assert s.headers['User-Agent'].endswith(custom_suffix)
+    # Verify access key is present in the UA
+    assert 'test_access' in s.headers['User-Agent']
+
+
+def test_default_user_agent_when_not_specified():
+    """Test that default user agent is used when custom is not specified."""
+    config = {
+        's3': {
+            'access': 'test_access',
+            'secret': 'test_secret',
+        },
+    }
+    s = internetarchive.session.ArchiveSession(config)
+    assert s.headers['user-agent'].startswith(f'internetarchive/{__version__}')
+
+
+def test_user_agent_suffix_in_requests():
+    """Test that the user agent suffix is appended and sent in requests."""
+    custom_suffix = 'TestAgent/2.0'
+    config = {
+        's3': {
+            'access': 'test_access',
+            'secret': 'test_secret',
+        },
+        'general': {
+            'user_agent_suffix': custom_suffix,
+        },
+    }
+
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, f'{PROTOCOL}//archive.org')
+        s = internetarchive.session.ArchiveSession(config)
+        r = s.get(f'{PROTOCOL}//archive.org')
+        # Verify the UA starts with the default and ends with the custom suffix
+        assert r.request.headers['User-Agent'].startswith(
+            f'internetarchive/{__version__}'
+        )
+        assert r.request.headers['User-Agent'].endswith(custom_suffix)
+        # Verify access key is present in the UA
+        assert 'test_access' in r.request.headers['User-Agent']
+
+
+def test_access_key_always_in_user_agent():
+    """Test that the access key is always present in the User-Agent."""
+    config = {
+        's3': {
+            'access': 'MY_ACCESS_KEY',
+            'secret': 'test_secret',
+        },
+    }
+    s = internetarchive.session.ArchiveSession(config)
+    assert 'MY_ACCESS_KEY' in s.headers['User-Agent']
+    assert s.headers['User-Agent'].startswith(f'internetarchive/{__version__}')
+
+
+def test_cookies():
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, f'{PROTOCOL}//archive.org')
+        s = internetarchive.session.ArchiveSession(CONFIG)
+        r = s.get(f'{PROTOCOL}//archive.org')
+        assert 'logged-in-sig' in r.request.headers['Cookie']
+        assert 'logged-in-user' in r.request.headers['Cookie']
+        for c in s.cookies:
+            if c.name.startswith('logged-in-'):
+                assert c.domain == '.archive.org'
+
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, f'{PROTOCOL}//example.com')
+        s = internetarchive.session.ArchiveSession(CONFIG)
+        r = s.get(f'{PROTOCOL}//example.com')
+        assert 'logged-in-sig' not in r.request.headers.get('Cookie', '')
+        assert 'logged-in-user' not in r.request.headers.get('Cookie', '')
+        assert '.archive.org' not in r.request.headers.get('Cookie', '')

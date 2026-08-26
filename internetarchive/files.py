@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
 #
 # The internetarchive module is a Python/CLI interface to Archive.org.
 #
-# Copyright (C) 2012-2017 Internet Archive
+# Copyright (C) 2012-2026 Internet Archive
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -21,31 +20,57 @@
 internetarchive.files
 ~~~~~~~~~~~~~~~~~~~~~
 
-:copyright: (C) 2012-2017 by Internet Archive.
+:copyright: (C) 2012-2024 by Internet Archive.
 :license: AGPL 3, see LICENSE for more details.
 """
-from __future__ import absolute_import, unicode_literals, print_function
 
-import os
-import sys
 import logging
+import os
 import socket
+import sys
+from contextlib import nullcontext, suppress
+from email.utils import parsedate_to_datetime
+from pathlib import Path
+from time import sleep
+from urllib.parse import quote
 
-import six.moves.urllib as urllib
-from requests.exceptions import HTTPError, RetryError, ConnectTimeout, \
-    ConnectionError, ReadTimeout
+from requests.exceptions import (
+    ConnectionError,
+    ConnectTimeout,
+    HTTPError,
+    ReadTimeout,
+    RetryError,
+)
+from tqdm import tqdm
 
-from internetarchive import iarequest, utils
-
+from internetarchive import auth, exceptions, iarequest, utils
 
 log = logging.getLogger(__name__)
 
 
-class BaseFile(object):
+class BaseFile:
+    """Base class for Archive.org file objects.
+
+    This class provides common attributes for file objects. It extracts
+    file metadata from item metadata and provides access to file properties
+    like size, format, checksums, and modification time.
+
+    Attributes:
+        identifier: The item identifier this file belongs to.
+        name: The filename.
+        size: File size in bytes.
+        source: File source (``'original'``, ``'derivative'``, ``'metadata'``).
+        format: File format (e.g., ``'JPEG'``, ``'Ogg Vorbis'``).
+        md5: MD5 checksum of the file.
+        sha1: SHA1 checksum of the file.
+        mtime: Modification time as a Unix timestamp.
+        crc32: CRC32 checksum of the file.
+        exists: ``True`` if the file exists in the item's metadata.
+    """
 
     def __init__(self, item_metadata, name, file_metadata=None):
         if file_metadata is None:
-            file_metadata = dict()
+            file_metadata = {}
         name = name.strip('/')
         if not file_metadata:
             for f in item_metadata.get('files', []):
@@ -63,10 +88,13 @@ class BaseFile(object):
         self.mtime = None
         self.crc32 = None
 
-        self.exists = True if file_metadata else False
+        self.exists = bool(file_metadata)
 
         for key in file_metadata:
             setattr(self, key, file_metadata[key])
+        # An additional, more orderly way to access file metadata,
+        # which avoids filtering the attributes.
+        self.metadata = file_metadata
         self.mtime = float(self.mtime) if self.mtime else 0
         self.size = int(self.size) if self.size else 0
 
@@ -97,255 +125,450 @@ class File(BaseFile):
     <https://archive.org/account/s3.php>`__
 
     """
+
     def __init__(self, item, name, file_metadata=None):
         """
-        :type item: Item
         :param item: The item that the file is part of.
-
-        :type name: str
         :param name: The filename of the file.
-
-        :type file_metadata: dict
-        :param file_metadata: (optional) a dict of metadata for the
-                              given fille.
+        :param file_metadata: A dict of metadata for the given file.
         """
-        super(File, self).__init__(item.item_metadata, name, file_metadata)
+        super().__init__(item.item_metadata, name, file_metadata)
         self.item = item
-        url_parts = dict(
-            protocol=item.session.protocol,
-            id=self.identifier,
-            name=urllib.parse.quote(name.encode('utf-8')),
-        )
-        self.url = '{protocol}//archive.org/download/{id}/{name}'.format(**url_parts)
+        url_parts = {
+            'protocol': item.session.protocol,
+            'id': self.identifier,
+            'name': quote(name.encode('utf-8')),
+            'host': item.session.host,
+        }
+        self.url = '{protocol}//{host}/download/{id}/{name}'.format(**url_parts)
+        if self.item.session.access_key and self.item.session.secret_key:
+            self.auth = auth.S3Auth(
+                self.item.session.access_key, self.item.session.secret_key
+            )
+        else:
+            self.auth = None
 
     def __repr__(self):
-        return ('File(identifier={identifier!r}, '
-                'filename={name!r}, '
-                'size={size!r}, '
-                'format={format!r})'.format(**self.__dict__))
+        return (
+            f'File(identifier={self.identifier!r}, '
+            f'filename={self.name!r}, '
+            f'size={self.size!r}, '
+            f'format={self.format!r})'
+        )
 
-    def download(self, file_path=None, verbose=None, silent=None, ignore_existing=None,
-                 checksum=None, destdir=None, retries=None, ignore_errors=None,
-                 fileobj=None, return_responses=None, no_change_timestamp=None):
+    def download(  # noqa: C901,PLR0911,PLR0912,PLR0915
+        self,
+        file_path=None,
+        verbose=None,
+        ignore_existing=None,
+        checksum=None,
+        checksum_archive=None,
+        destdir=None,
+        retries=None,
+        ignore_errors=None,
+        fileobj=None,
+        return_responses=None,
+        no_change_timestamp=None,
+        params=None,
+        chunk_size=None,
+        stdout=None,
+        ors=None,
+        timeout=None,
+        headers=None,
+        count_views=False,
+    ):
         """Download the file into the current working directory.
 
-        :type file_path: str
         :param file_path: Download file to the given file_path.
-
-        :type verbose: bool
-        :param verbose: (optional) Turn on verbose output.
-
-        :type silent: bool
-        :param silent: (optional) Suppress all output.
-
-        :type ignore_existing: bool
-        :param ignore_existing: Overwrite local files if they already
-                                exist.
-
-        :type checksum: bool
-        :param checksum: (optional) Skip downloading file based on checksum.
-
-        :type destdir: str
-        :param destdir: (optional) The directory to download files to.
-
-        :type retries: int
-        :param retries: (optional) The number of times to retry on failed
-                        requests.
-
-        :type ignore_errors: bool
-        :param ignore_errors: (optional) Don't fail if a single file fails to
+        :param verbose: Turn on verbose output.
+        :param ignore_existing: Overwrite local files if they already exist.
+        :param checksum: Skip downloading file based on checksum.
+        :param checksum_archive: Skip downloading file based on checksum, and
+                                 skip checksum validation if it already succeeded
+                                 (will create and use _checksum_archive.txt).
+        :param destdir: The directory to download files to.
+        :param retries: The number of times to retry on failed requests.
+        :param ignore_errors: Don't fail if a single file fails to
                               download, continue to download other files.
-
-        :type fileobj: file-like object
-        :param fileobj: (optional) Write data to the given file-like object
-                         (e.g. sys.stdout).
-
-        :type return_responses: bool
-        :param return_responses: (optional) Rather than downloading files to disk, return
+        :param fileobj: Write data to the given file-like object
+                        (e.g. sys.stdout).
+        :param return_responses: Rather than downloading files to disk, return
                                  a list of response objects.
+        :param no_change_timestamp: If True, leave the time stamp as the
+                                    current time instead of changing it to
+                                    that given in the original archive.
+        :param stdout: Print contents of file to stdout instead of
+                       downloading to file.
+        :param ors: Append a newline or $ORS to the end of file.
+                    This is mainly intended to be used internally with `stdout`.
+        :param params: URL parameters to send with download request.
+                       By default the library injects ``cnt=0`` so downloads do
+                       not count toward archive.org view counts; pass
+                       ``count_views=True`` to omit it. An explicit ``cnt`` key
+                       in ``params`` always wins.
+        :param count_views: If True, omit the default ``cnt=0`` parameter so
+                            the download counts toward archive.org view counts.
+                            Has no effect if ``params`` already contains a
+                            ``cnt`` key.
+        :param headers: Extra HTTP headers to send with the download request.
+                        Supplying a ``Range`` header (e.g.
+                        ``{'Range': 'bytes=0-1023'}``) performs an intentional
+                        partial fetch: the automatic resume behaviour and
+                        full-file checksum validation are skipped, so the bytes
+                        returned by the server are written as-is.
 
-        :type no_change_timestamp: bool
-        :param no_change_timestamp: (optional) If True, leave the time stamp as the
-                                    current time instead of changing it to that given in
-                                    the original archive.
-
-        :rtype: bool
-        :returns: True if file was successfully downloaded.
+        :returns: ``True`` if file was successfully downloaded.
         """
         verbose = False if verbose is None else verbose
         ignore_existing = False if ignore_existing is None else ignore_existing
         checksum = False if checksum is None else checksum
-        retries = 2 if not retries else retries
-        ignore_errors = False if not ignore_errors else ignore_errors
-        return_responses = False if not return_responses else return_responses
-        no_change_timestamp = False if not no_change_timestamp else no_change_timestamp
-
-        if (fileobj and silent is None) or silent is not False:
-            silent = True
-        else:
-            silent = False
+        checksum_archive = False if checksum_archive is None else checksum_archive
+        retries = retries or 2
+        ignore_errors = ignore_errors or False
+        return_responses = return_responses or False
+        no_change_timestamp = no_change_timestamp or False
+        params = dict(params) if params else {}
+        if not count_views:
+            params.setdefault('cnt', '0')
+        timeout = 12 if not timeout else timeout
+        headers = headers or {}
+        retries_sleep = 3  # TODO: exponential sleep
+        retrying = False  # for retry loop
+        resume = False  # True when auto-resuming a partial local download
+        # Whether the caller supplied an explicit Range header (case-insensitive).
+        # An explicit range is an intentional partial fetch and must never trigger
+        # auto-resume or full-file checksum validation.
+        explicit_range = any(k.lower() == 'range' for k in headers)
 
         self.item.session.mount_http_adapter(max_retries=retries)
-        file_path = self.name if not file_path else file_path
+        file_path = file_path or self.name
+
+        if os.name == 'nt' and not return_responses:
+            file_path, _ = utils.sanitize_windows_relpath(
+                file_path,
+                verbose=bool(verbose),
+                printer=lambda m: print(m, file=sys.stderr),
+            )
 
         if destdir:
-            if not os.path.exists(destdir) and return_responses is not True:
-                os.mkdir(destdir)
+            if not (return_responses or stdout):
+                try:
+                    os.makedirs(destdir, exist_ok=True)
+                except OSError:
+                    pass
             if os.path.isfile(destdir):
-                raise IOError('{} is not a directory!'.format(destdir))
+                raise OSError(f'{destdir} is not a directory!')
             file_path = os.path.join(destdir, file_path)
 
-        if not return_responses and os.path.exists(file_path.encode('utf-8')):
+        # Windows sanitization handled earlier; legacy comment removed.
+
+        # Directory traversal guard (all platforms). Ensure target path is inside destdir
+        # (or cwd if none provided). Determine intended base directory.
+        intended_base = destdir if destdir else os.getcwd()
+        try:
+            if not utils.is_path_within_directory(
+                intended_base, os.path.abspath(file_path)
+            ):
+                raise exceptions.DirectoryTraversalError(
+                    f'Unsafe file path resolved outside destination directory: {file_path}'
+                )
+        except AttributeError:
+            # Fallback if DirectoryTraversalError not present (older versions); re-raise generic.
+            raise OSError(
+                f'Unsafe file path resolved outside destination directory: {file_path}'
+            )
+
+        parent_dir = os.path.dirname(file_path)
+
+        # Warn (not fail) if path length may cause Windows issues (>240 chars typical safe limit)
+        if os.name == 'nt' and len(os.path.abspath(file_path)) > 240:
+            log.warning('Long path may cause issues: %s', file_path)
+            if verbose:
+                print(
+                    f' warning: long path may cause issues: {file_path}',
+                    file=sys.stderr,
+                )
+
+        # Check if we should skip... (never when streaming to stdout: the
+        # local filesystem is irrelevant to a stdout download).
+        if (
+            not return_responses
+            and not stdout
+            and os.path.exists(file_path.encode('utf-8'))
+        ):
+            if checksum_archive:
+                checksum_archive_filename = '_checksum_archive.txt'
+                if not os.path.exists(checksum_archive_filename):
+                    with open(checksum_archive_filename, 'w', encoding='utf-8') as f:
+                        pass
+                with open(checksum_archive_filename, encoding='utf-8') as f:
+                    checksum_archive_data = f.read().splitlines()
+                if file_path in checksum_archive_data:
+                    msg = (
+                        f'skipping {file_path}, '
+                        f'file already exists based on checksum_archive.'
+                    )
+                    log.info(msg)
+                    if verbose:
+                        print(f' {msg}', file=sys.stderr)
+                    return
             if ignore_existing:
-                msg = 'skipping {0}, file already exists.'.format(file_path)
+                msg = f'skipping {file_path}, file already exists.'
                 log.info(msg)
                 if verbose:
-                    print(' ' + msg)
-                elif silent is False:
-                    print('.', end='')
-                    sys.stdout.flush()
+                    print(f' {msg}', file=sys.stderr)
                 return
-            elif checksum:
+            elif checksum or checksum_archive:
                 with open(file_path, 'rb') as fp:
                     md5_sum = utils.get_md5(fp)
 
                 if md5_sum == self.md5:
-                    msg = ('skipping {0}, '
-                           'file already exists based on checksum.'.format(file_path))
+                    msg = (
+                        f'skipping {file_path}, file already exists based on checksum.'
+                    )
                     log.info(msg)
                     if verbose:
-                        print(' ' + msg)
-                    elif silent is False:
-                        print('.', end='')
-                        sys.stdout.flush()
-                    return
-            else:
-                st = os.stat(file_path.encode('utf-8'))
-                if (st.st_mtime == self.mtime) and (st.st_size == self.size) \
-                        or self.name.endswith('_files.xml') and st.st_size != 0:
-                    msg = ('skipping {0}, file already exists '
-                           'based on length and date.'.format(file_path))
-                    log.info(msg)
-                    if verbose:
-                        print(' ' + msg)
-                    elif silent is False:
-                        print('.', end='')
-                        sys.stdout.flush()
+                        print(f' {msg}', file=sys.stderr)
+                    if checksum_archive:
+                        # add file to checksum_archive to skip it next time
+                        with open(
+                            checksum_archive_filename, 'a', encoding='utf-8'
+                        ) as f:
+                            f.write(f'{file_path}\n')
                     return
 
-        parent_dir = os.path.dirname(file_path)
-        if parent_dir != '' \
-                and not os.path.exists(parent_dir) \
-                and return_responses is not True:
-            os.makedirs(parent_dir)
+        # Retry loop
+        while True:
+            try:
+                if parent_dir != '' and not (return_responses or stdout):
+                    os.makedirs(parent_dir, exist_ok=True)
 
-        try:
-            response = self.item.session.get(self.url, stream=True, timeout=12)
-            response.raise_for_status()
-            if return_responses:
-                return response
+                if (
+                    not return_responses
+                    and not stdout
+                    and not ignore_existing
+                    and self.name != f'{self.identifier}_files.xml'
+                    and os.path.exists(file_path.encode('utf-8'))
+                ):
+                    st = os.stat(file_path.encode('utf-8'))
+                    # Only auto-resume when the caller has not supplied an explicit
+                    # Range header (e.g. via the ``--range`` CLI flag). An explicit
+                    # range is an intentional partial fetch and must not trigger the
+                    # resume seek/append or the full-file checksum validation below.
+                    # (Resume is also skipped for stdout, since seeking a pipe fails
+                    # and there is no local partial file to append to.)
+                    if (
+                        st.st_size != self.size
+                        and not (checksum or checksum_archive)
+                        and not explicit_range
+                    ):
+                        # Recompute the resume Range from the current file size on
+                        # every attempt so it stays aligned with the seek offset
+                        # below; a stale Range left over from a prior attempt would
+                        # re-fetch already-written bytes and corrupt the file.
+                        # Preserve any caller-supplied headers; only set Range.
+                        headers = {**headers, "Range": f"bytes={st.st_size}-"}
+                        resume = True
 
-            chunk_size = 2048
-            if not fileobj:
-                fileobj = open(file_path.encode('utf-8'), 'wb')
+                response = self.item.session.get(
+                    self.url,
+                    stream=True,
+                    timeout=timeout,
+                    auth=self.auth,
+                    params=params,
+                    headers=headers,
+                )
+                # Get timestamp from Last-Modified header
+                last_mod_header = response.headers.get('Last-Modified')
+                if last_mod_header:
+                    dt = parsedate_to_datetime(last_mod_header)
+                    last_mod_mtime = dt.timestamp()
+                else:
+                    last_mod_mtime = self.mtime
 
-            with fileobj:
-                for chunk in response.iter_content(chunk_size=chunk_size):
-                    if chunk:
-                        fileobj.write(chunk)
-                        fileobj.flush()
-        except (RetryError, HTTPError, ConnectTimeout,
-                ConnectionError, socket.error, ReadTimeout) as exc:
-            msg = ('error downloading file {0}, '
-                   'exception raised: {1}'.format(file_path, exc))
-            log.error(msg)
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            if verbose:
-                print(' ' + msg)
-            elif silent is False:
-                print('e', end='')
-                sys.stdout.flush()
-            if ignore_errors is True:
-                return False
-            else:
-                raise exc
+                response.raise_for_status()
 
-        # Set mtime with mtime from files.xml.
+                # Check if we should skip based on last modified time...
+                if (
+                    not fileobj
+                    and not return_responses
+                    and not stdout
+                    and os.path.exists(file_path.encode('utf-8'))
+                ):
+                    st = os.stat(file_path.encode('utf-8'))
+                    if st.st_mtime == last_mod_mtime:
+                        if self.name == f'{self.identifier}_files.xml' or (
+                            st.st_size == self.size
+                        ):
+                            msg = (
+                                f'skipping {file_path}, file already exists based on '
+                                'length and date.'
+                            )
+                            log.info(msg)
+                            if verbose:
+                                print(f' {msg}', file=sys.stderr)
+                            return
+
+                elif return_responses:
+                    return response
+
+                if verbose:
+                    total = int(response.headers.get('content-length', 0)) or None
+                    progress_bar = tqdm(
+                        desc=f' downloading {self.name}',
+                        total=total,
+                        unit='iB',
+                        unit_scale=True,
+                        unit_divisor=1024,
+                    )
+                else:
+                    progress_bar = nullcontext()
+
+                if not chunk_size:
+                    chunk_size = 1048576
+                if stdout:
+                    # stdout is its own sink; never fall back to a local file,
+                    # even on a retry (which must keep writing to the pipe).
+                    fileobj = os.fdopen(sys.stdout.fileno(), 'wb', closefd=False)
+                elif not fileobj or retrying:
+                    if resume:
+                        fileobj = open(file_path.encode('utf-8'), 'rb+')
+                    else:
+                        fileobj = open(file_path.encode('utf-8'), 'wb')
+
+                with fileobj, progress_bar as bar:
+                    if resume:
+                        fileobj.seek(st.st_size)
+                    for chunk in response.iter_content(chunk_size=chunk_size):
+                        if chunk:
+                            size = fileobj.write(chunk)
+                            if bar is not None:
+                                bar.update(size)
+                    if ors:
+                        fileobj.write(os.environ.get("ORS", "\n").encode("utf-8"))
+
+                if resume:
+                    with open(file_path, 'rb') as fh:
+                        local_checksum = utils.get_md5(fh)
+                    try:
+                        assert local_checksum == self.md5
+                    except AssertionError:
+                        msg = (
+                            f"\"{file_path}\" corrupt, "
+                            "checksums do not match. "
+                            "Remote file may have been modified, "
+                            "retry download."
+                        )
+                        os.remove(file_path.encode('utf-8'))
+                        raise exceptions.InvalidChecksumError(msg)
+                break
+            except (
+                RetryError,
+                HTTPError,
+                ConnectTimeout,
+                OSError,
+                ReadTimeout,
+                exceptions.InvalidChecksumError,
+            ) as exc:
+                # A 416 (Range Not Satisfiable) is a permanent response to an
+                # explicit range request -- retrying cannot help, so fail fast.
+                resp = getattr(exc, 'response', None)
+                unsatisfiable = getattr(resp, 'status_code', None) == 416
+                if retries > 0 and not unsatisfiable:
+                    retrying = True
+                    retries -= 1
+                    msg = (
+                        'download failed, sleeping for '
+                        f'{retries_sleep} seconds and retrying. '
+                        f'{retries} retries left.'
+                    )
+                    log.warning(msg)
+                    sleep(retries_sleep)
+                    continue
+                if unsatisfiable:
+                    valid = resp.headers.get('Content-Range', '')
+                    rng = headers.get('Range', '')
+                    msg = (
+                        f'error downloading {file_path}: requested range '
+                        f'{rng!r} not satisfiable'
+                        + (f' (file is {valid})' if valid else '')
+                    )
+                else:
+                    msg = f'error downloading file {file_path}, exception raised: {exc}'
+                log.error(msg)
+                # Never touch the local filesystem for a stdout download.
+                if not stdout:
+                    try:
+                        os.remove(file_path)
+                    except OSError:
+                        pass
+                if verbose:
+                    print(f' {msg}', file=sys.stderr)
+                if ignore_errors:
+                    return False
+                else:
+                    raise exc
+
+        # Set mtime with timestamp from Last-Modified header
         if not no_change_timestamp:
             # If we want to set the timestamp to that of the original archive...
-            try:
-                os.utime(file_path.encode('utf-8'), (0, self.mtime))
-            except OSError:
-                # Probably file-like object, e.g. sys.stdout.
-                pass
+            with suppress(OSError):  # Probably file-like object, e.g. sys.stdout.
+                os.utime(file_path.encode('utf-8'), (0, last_mod_mtime))
 
-        msg = 'downloaded {0}/{1} to {2}'.format(self.identifier,
-                                                 self.name,
-                                                 file_path)
+        msg = f'downloaded {self.identifier}/{self.name} to {file_path}'
         log.info(msg)
-        if verbose:
-            print(' ' + msg)
-        elif silent is False:
-            print('d', end='')
-            sys.stdout.flush()
         return True
 
-    def delete(self, cascade_delete=None, access_key=None, secret_key=None, verbose=None,
-               debug=None, retries=None, headers=None):
-        """Delete a file from the Archive. Note: Some files -- such as
-        <itemname>_meta.xml -- cannot be deleted.
+    def delete(
+        self,
+        cascade_delete=None,
+        access_key=None,
+        secret_key=None,
+        verbose=None,
+        debug=None,
+        retries=None,
+        headers=None,
+    ):
+        """Delete a file from the Archive.
 
-        :type cascade_delete: bool
-        :param cascade_delete: (optional) Also deletes files derived from the file, and
-                               files the file was derived from.
+        Note: Some files -- such as ``<itemname>_meta.xml`` -- cannot be deleted.
 
-        :type access_key: str
-        :param access_key: (optional) IA-S3 access_key to use when making the given
-                           request.
-
-        :type secret_key: str
-        :param secret_key: (optional) IA-S3 secret_key to use when making the given
-                           request.
-
-        :type verbose: bool
-        :param verbose: (optional) Print actions to stdout.
-
-        :type debug: bool
-        :param debug: (optional) Set to True to print headers to stdout and exit exit
+        :param cascade_delete: Delete all files associated with the specified
+                               file, including upstream derivatives and the original.
+        :param access_key: IA-S3 access_key to use when making the given request.
+        :param secret_key: IA-S3 secret_key to use when making the given request.
+        :param verbose: Print actions to stdout.
+        :param debug: Set to True to print headers to stdout and exit
                       without sending the delete request.
-
         """
         cascade_delete = '0' if not cascade_delete else '1'
         access_key = self.item.session.access_key if not access_key else access_key
         secret_key = self.item.session.secret_key if not secret_key else secret_key
-        debug = False if not debug else debug
-        verbose = False if not verbose else verbose
-        max_retries = 2 if retries is None else retries
-        headers = dict() if headers is None else headers
+        debug = debug or False
+        verbose = verbose or False
+        max_retries = retries or 2
+        headers = headers or {}
 
         if 'x-archive-cascade-delete' not in headers:
             headers['x-archive-cascade-delete'] = cascade_delete
 
-        url = '{0}//s3.us.archive.org/{1}/{2}'.format(self.item.session.protocol,
-                                                      self.identifier,
-                                                      self.name)
-        self.item.session.mount_http_adapter(max_retries=max_retries,
-                                             status_forcelist=[503],
-                                             host='s3.us.archive.org')
+        url = f'{self.item.session.protocol}//s3.us.archive.org/{self.identifier}/{quote(self.name)}'
+        self.item.session.mount_http_adapter(
+            max_retries=max_retries, status_forcelist=[503], host='s3.us.archive.org'
+        )
         request = iarequest.S3Request(
             method='DELETE',
             url=url,
             headers=headers,
             access_key=access_key,
-            secret_key=secret_key
+            secret_key=secret_key,
         )
         if debug:
             return request
         else:
             if verbose:
-                msg = ' deleting: {0}'.format(self.name)
-                if cascade_delete:
+                msg = f' deleting: {self.name}'
+                if cascade_delete == '1':
                     msg += ' and all derivative files.'
                 print(msg, file=sys.stderr)
             prepared_request = self.item.session.prepare_request(request)
@@ -353,9 +576,8 @@ class File(BaseFile):
             try:
                 resp = self.item.session.send(prepared_request)
                 resp.raise_for_status()
-            except (RetryError, HTTPError, ConnectTimeout,
-                    ConnectionError, socket.error, ReadTimeout) as exc:
-                error_msg = 'Error deleting {0}, {1}'.format(url, exc)
+            except (RetryError, HTTPError, ConnectTimeout, OSError, ReadTimeout) as exc:
+                error_msg = f'Error deleting {url}, {exc}'
                 log.error(error_msg)
                 raise
             else:
@@ -366,18 +588,16 @@ class File(BaseFile):
                 # mounted if and when the session object is used for an
                 # upload. This is important because we use custom retry
                 # handling for IA-S3 uploads.
-                url_prefix = '{0}//s3.us.archive.org'.format(self.item.session.protocol)
+                url_prefix = f'{self.item.session.protocol}//s3.us.archive.org'
                 del self.item.session.adapters[url_prefix]
 
 
 class OnTheFlyFile(File):
+    """A file that is generated on-the-fly by Archive.org (e.g., EPUB, MOBI)."""
+
     def __init__(self, item, name):
         """
-        :type item: Item
         :param item: The item that the file is part of.
-
-        :type name: str
         :param name: The filename of the file.
-
         """
-        super(OnTheFlyFile, self).__init__(item.item_metadata, name)
+        super().__init__(item.item_metadata, name)

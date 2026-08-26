@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
 #
 # The internetarchive module is a Python/CLI interface to Archive.org.
 #
-# Copyright (C) 2012-2017 Internet Archive
+# Copyright (C) 2012-2026 Internet Archive
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -21,59 +20,90 @@
 internetarchive.item
 ~~~~~~~~~~~~~~~~~~~~
 
-:copyright: (C) 2012-2017 by Internet Archive.
+:copyright: (C) 2012-2024 by Internet Archive.
 :license: AGPL 3, see LICENSE for more details.
 """
-from __future__ import absolute_import, unicode_literals, print_function
 
+from __future__ import annotations
+
+import io
+import math
 import os
+import socket
 import sys
+from collections.abc import Mapping, MutableMapping
+from copy import deepcopy
+from datetime import datetime
 from fnmatch import fnmatch
+from functools import total_ordering
 from logging import getLogger
 from time import sleep
+from typing import Optional
+from urllib.parse import quote, urlparse
+from xml.parsers.expat import ExpatError
 
-try:
-    from functools import total_ordering
-except ImportError:
-    from total_ordering import total_ordering
-import json
-from copy import deepcopy
-
-from six import string_types
-from six.moves import urllib
-from requests import Response
-from clint.textui import progress
+from requests import Request, Response
 from requests.exceptions import HTTPError
+from tqdm import tqdm
 
-from internetarchive.utils import IdentifierListAsItems, get_md5, chunk_generator, \
-    IterableToFileAdapter, iter_directory, recursive_file_count, norm_filepath
+from internetarchive import catalog, exceptions
+from internetarchive.auth import S3Auth
 from internetarchive.files import File
 from internetarchive.iarequest import MetadataRequest, S3Request
-from internetarchive.utils import get_s3_xml_text, get_file_size, is_dir
+from internetarchive.utils import (
+    IdentifierListAsItems,
+    IterableToFileAdapter,
+    chunk_generator,
+    flatten_pipe_patterns,
+    get_file_size,
+    get_md5,
+    get_s3_xml_text,
+    is_dir,
+    iter_directory,
+    json,
+    norm_filepath,
+    recursive_file_count_and_size,
+    validate_s3_identifier,
+)
 
 log = getLogger(__name__)
 
 
 @total_ordering
-class BaseItem(object):
-    EXCLUDED_ITEM_METADATA_KEYS = (u'workable_servers', u'server')
+class BaseItem:
+    """Base class for Archive.org items.
 
-    def __init__(self, identifier=None, item_metadata=None):
+    This class provides common functionality for both :class:`Item` and
+    :class:`Collection` classes. It handles loading and storing item
+    metadata from the Archive.org Metadata API.
+
+    .. note::
+        This class should not be instantiated directly. Use :class:`Item`
+        or :class:`Collection` instead.
+    """
+
+    EXCLUDED_ITEM_METADATA_KEYS = ('workable_servers', 'server')
+
+    def __init__(
+        self,
+        identifier: str | None = None,
+        item_metadata: Mapping | None = None,
+    ):
         # Default attributes.
         self.identifier = identifier
-        self.item_metadata = {} if not item_metadata else item_metadata
-        self.exists = None
+        self.item_metadata = item_metadata or {}
+        self.exists = False
 
         # Archive.org metadata attributes.
-        self.metadata = {}
-        self.files = []
+        self.metadata: dict = {}
+        self.files: list[dict] = []
         self.created = None
         self.d1 = None
         self.d2 = None
         self.dir = None
         self.files_count = None
         self.item_size = None
-        self.reviews = []
+        self.reviews: list = []
         self.server = None
         self.uniq = None
         self.updated = None
@@ -83,15 +113,24 @@ class BaseItem(object):
         # Load item.
         self.load()
 
-    def __repr__(self):
-        return ('{0.__class__.__name__}(identifier={0.identifier!r}{notloaded})'.format(
-            self, notloaded=', item_metadata={}' if not self.exists else ''))
+    def __repr__(self) -> str:
+        notloaded = ', item_metadata={}' if not self.exists else ''
+        return f'{self.__class__.__name__}(identifier={self.identifier!r}{notloaded})'
 
-    def load(self, item_metadata=None):
+    def load(self, item_metadata: Mapping | None = None) -> None:
+        """Load or reload item metadata.
+
+        Populates the item's attributes from the metadata dict. This is
+        called automatically during initialization and can be called
+        again to refresh the item's state.
+
+        :param item_metadata: Optional new metadata dict to load.
+                             If not provided, uses the existing metadata.
+        """
         if item_metadata:
             self.item_metadata = item_metadata
 
-        self.exists = True if self.item_metadata else False
+        self.exists = bool(self.item_metadata)
 
         for key in self.item_metadata:
             setattr(self, key, self.item_metadata[key])
@@ -100,24 +139,31 @@ class BaseItem(object):
             self.identifier = self.metadata.get('identifier')
 
         mc = self.metadata.get('collection', [])
-        self.collection = IdentifierListAsItems(mc, self.session)
+        # TODO: The `type: ignore` on the following line should be removed.  See #518
+        self.collection = IdentifierListAsItems(mc, self.session)  # type: ignore
 
-    def __eq__(self, other):
-        return self.item_metadata == other.item_metadata or \
-            (self.item_metadata.keys() == other.item_metadata.keys() and
-             all(self.item_metadata[x] == other.item_metadata[x]
-                 for x in self.item_metadata
-                 if x not in self.EXCLUDED_ITEM_METADATA_KEYS))
+    def __eq__(self, other) -> bool:
+        return self.item_metadata == other.item_metadata or (
+            self.item_metadata.keys() == other.item_metadata.keys()
+            and all(
+                self.item_metadata[x] == other.item_metadata[x]
+                for x in self.item_metadata
+                if x not in self.EXCLUDED_ITEM_METADATA_KEYS
+            )
+        )
 
-    def __le__(self, other):
+    def __le__(self, other) -> bool:
         return self.identifier <= other.identifier
 
-    def __hash__(self):
-        without_excluded_keys = dict(
-            (k, v) for (k, v) in self.item_metadata.items()
-            if k not in self.EXCLUDED_ITEM_METADATA_KEYS)
-        return hash(json.dumps(without_excluded_keys,
-                               sort_keys=True, check_circular=False))
+    def __hash__(self) -> int:
+        without_excluded_keys = {
+            k: v
+            for k, v in self.item_metadata.items()
+            if k not in self.EXCLUDED_ITEM_METADATA_KEYS
+        }
+        return hash(
+            json.dumps(without_excluded_keys, sort_keys=True, check_circular=False)  # type: ignore
+        )
 
 
 class Item(BaseItem):
@@ -131,7 +177,7 @@ class Item(BaseItem):
 
     Or to modify the metadata for an item::
 
-        >>> metadata = dict(title='The Stairs')
+        >>> metadata = {'title': 'The Stairs'}
         >>> item.modify_metadata(metadata)
         >>> print(item.metadata['title'])
         'The Stairs'
@@ -148,11 +194,15 @@ class Item(BaseItem):
     <https://archive.org/account/s3.php>`__
     """
 
-    def __init__(self, archive_session, identifier, item_metadata=None):
+    def __init__(
+        self,
+        archive_session,
+        identifier: str,
+        item_metadata: Mapping | None = None,
+    ):
         """
-        :type archive_session: :class:`ArchiveSession <ArchiveSession>`
+        :param archive_session: :class:`ArchiveSession <ArchiveSession>`
 
-        :type identifier: str
         :param identifier: The globally unique Archive.org identifier for this item.
 
                            An identifier is composed of any unique combination of
@@ -166,20 +216,21 @@ class Item(BaseItem):
                            with the item or object and is involved in every manner of
                            accessing or referring to the item.
 
-        :type item_metadata: dict
-        :param item_metadata: (optional) The Archive.org item metadata used to initialize
+        :param item_metadata: The Archive.org item metadata used to initialize
                               this item.  If no item metadata is provided, it will be
                               retrieved from Archive.org using the provided identifier.
         """
         self.session = archive_session
-        super(Item, self).__init__(identifier, item_metadata)
+        super().__init__(identifier, item_metadata)
 
         self.urls = Item.URLs(self)
 
         if self.metadata.get('title'):
             # A copyable link to the item, in MediaWiki format
-            self.wikilink = '* [{0.urls.details} {0.identifier}] ' \
-                            '-- {0.metadata[title]}'.format(self)
+            details = self.urls.details  # type: ignore
+            self.wikilink = (
+                f'* [{details} {self.identifier}] -- {self.metadata["title"]}'
+            )
 
     class URLs:
         def __init__(self, itm_obj):
@@ -196,41 +247,466 @@ class Item(BaseItem):
                 self._make_tab_URL('about')
                 self._make_tab_URL('collection')
 
-        def _make_tab_URL(self, tab):
+        def _make_tab_URL(self, tab: str) -> None:
             """Make URLs for the separate tabs of Collections details page."""
-            self._make_URL(tab, self.details + "&tab={tab}".format(tab=tab))
+            self._make_URL(tab, self.details + f'&tab={tab}')  # type: ignore
 
-        DEFAULT_URL_FORMAT = '{0.session.protocol}//archive.org/{path}/{0.identifier}'
+        DEFAULT_URL_FORMAT = (
+            '{0.session.protocol}//{0.session.host}/{path}/{0.identifier}'
+        )
 
-        def _make_URL(self, path, url_format=DEFAULT_URL_FORMAT):
+        def _make_URL(self, path: str, url_format: str = DEFAULT_URL_FORMAT) -> None:
             setattr(self, path, url_format.format(self._itm_obj, path=path))
             self._paths.append(path)
 
-        def __str__(self):
-            return "URLs ({1}) for {0.identifier}" \
-                   .format(self._itm_obj, ', '.join(self._paths))
+        def __str__(self) -> str:
+            return f'URLs ({", ".join(self._paths)}) for {self._itm_obj.identifier}'
 
-    def refresh(self, item_metadata=None, **kwargs):
+    def refresh(self, item_metadata: Mapping | None = None, **kwargs) -> None:
+        """Refresh the item's metadata from Archive.org.
+
+        Fetches the latest metadata from the Archive.org Metadata API and
+        reloads the item's attributes.
+
+        :param item_metadata: Optional metadata dict to use instead of
+                             fetching from Archive.org.
+        :param kwargs: Additional keyword arguments passed to
+                      :meth:`ArchiveSession.get_metadata`.
+        """
         if not item_metadata:
             item_metadata = self.session.get_metadata(self.identifier, **kwargs)
         self.load(item_metadata)
 
-    def get_file(self, file_name, file_metadata=None):
+    def identifier_available(self) -> bool:
+        """Check if the item identifier is available for creating a
+        new item.
+
+        :return: `True` if identifier is available, or `False` if it is
+                 not available.
+        """
+        url = f'{self.session.protocol}//{self.session.host}/services/check_identifier.php'
+        params = {'output': 'json', 'identifier': self.identifier}
+        response = self.session.get(url, params=params)
+        availability = response.json()['code']
+        return availability == 'available'
+
+    def get_task_summary(
+        self,
+        params: Mapping | None = None,
+        request_kwargs: Mapping | None = None,
+    ) -> dict:
+        """Get a summary of the item's pending tasks.
+
+        :param params: Params to send with your request.
+
+        :returns: A summary of the item's pending tasks.
+        """
+        return self.session.get_tasks_summary(self.identifier, params, request_kwargs)
+
+    def no_tasks_pending(
+        self,
+        params: Mapping | None = None,
+        request_kwargs: Mapping | None = None,
+    ) -> bool:
+        """Check if there is any pending task for the item.
+
+        :param params: Params to send with your request.
+
+        :returns: `True` if no tasks are pending, otherwise `False`.
+        """
+        return all(
+            x == 0 for x in self.get_task_summary(params, request_kwargs).values()
+        )
+
+    def get_all_item_tasks(
+        self,
+        params: dict | None = None,
+        request_kwargs: Mapping | None = None,
+    ) -> list[catalog.CatalogTask]:
+        """Get a list of all tasks for the item, pending and complete.
+
+        :param params: Query parameters, refer to
+                       `Tasks API
+                       <https://archive.org/services/docs/api/tasks.html>`_
+                       for available parameters.
+
+        :param request_kwargs: Keyword arguments that
+                               :py:func:`requests.get` takes.
+
+        :returns: A list of all tasks for the item, pending and complete.
+        """
+        params = params or {}
+        params.update({'catalog': 1, 'history': 1})
+        return self.session.get_tasks(self.identifier, params, request_kwargs)
+
+    def get_history(
+        self,
+        params: Mapping | None = None,
+        request_kwargs: Mapping | None = None,
+    ) -> list[catalog.CatalogTask]:
+        """Get a list of completed catalog tasks for the item.
+
+        :param params: Params to send with your request.
+
+        :returns: A list of completed catalog tasks for the item.
+        """
+        return list(self.session.iter_history(self.identifier, params, request_kwargs))
+
+    def get_catalog(
+        self,
+        params: Mapping | None = None,
+        request_kwargs: Mapping | None = None,
+    ) -> list[catalog.CatalogTask]:
+        """Get a list of pending catalog tasks for the item.
+
+        :param params: Params to send with your request.
+
+        :returns: A list of pending catalog tasks for the item.
+        """
+        return list(self.session.iter_catalog(self.identifier, params, request_kwargs))
+
+    def derive(
+        self,
+        priority: int = 0,
+        remove_derived: str | None = None,
+        reduced_priority: bool = False,
+        data: MutableMapping | None = None,
+        headers: Mapping | None = None,
+        request_kwargs: Mapping | None = None,
+    ) -> Response:
+        """Derive an item.
+
+        :param priority: Task priority from 10 to -10 [default: 0]
+
+        :param remove_derived: You can use wildcards ("globs")
+                               to only remove *some* prior derivatives.
+                               For example, "*" (typed without the
+                               quotation marks) specifies that all
+                               derivatives (in the item's top directory)
+                               are to be rebuilt. "*.mp4" specifies that
+                               all "*.mp4" deriviatives are to be rebuilt.
+                               "{*.gif,*thumbs/*.jpg}" specifies that all
+                               GIF and thumbs are to be rebuilt.
+
+        :param reduced_priority: Submit your derive at a lower priority.
+                                 This option is helpful to get around rate-limiting.
+                                 Your task will more likely be accepted, but it might
+                                 not run for a long time. Note that you still may be
+                                 subject to rate-limiting.
+
+        :returns: :class:`requests.Response`
+        """
+        data = data or {}
+
+        if remove_derived is not None:
+            if not data.get('args'):
+                data['args'] = {'remove_derived': remove_derived}
+            else:
+                data['args'].update({'remove_derived': remove_derived})
+
+        r = self.session.submit_task(
+            self.identifier,
+            'derive.php',
+            priority=priority,
+            data=data,
+            headers=headers,
+            reduced_priority=reduced_priority,
+            request_kwargs=request_kwargs,
+        )
+        r.raise_for_status()
+        return r
+
+    def fixer(
+        self,
+        ops: list | str | None = None,
+        priority: int | str | None = None,
+        reduced_priority: bool = False,
+        data: MutableMapping | None = None,
+        headers: Mapping | None = None,
+        request_kwargs: Mapping | None = None,
+    ) -> Response:
+        """Submit a fixer task on an item.
+
+        :param ops: The fixer operation(s) to run on the item
+                    [default: noop].
+
+        :param priority: The task priority.
+
+        :param reduced_priority: Submit your derive at a lower priority.
+                                 This option is helpful to get around rate-limiting.
+                                 Your task will more likely be accepted, but it might
+                                 not run for a long time. Note that you still may be
+                                 subject to rate-limiting. This is different than
+                                 ``priority`` in that it will allow you to possibly
+                                 avoid rate-limiting.
+
+        :param data: Additional parameters to submit with
+                     the task.
+
+        :returns: :class:`requests.Response`
+        """
+        data = data or {}
+
+        ops = ops or ['noop']
+        if not isinstance(ops, (list, tuple, set)):
+            ops = [ops]
+        data['args'] = data.get('args') or {}
+        for op in ops:
+            data['args'][op] = '1'
+
+        r = self.session.submit_task(
+            self.identifier,
+            'fixer.php',
+            priority=priority,
+            data=data,
+            headers=headers,
+            reduced_priority=reduced_priority,
+            request_kwargs=request_kwargs,
+        )
+        r.raise_for_status()
+        return r
+
+    def undark(
+        self,
+        comment: str,
+        priority: int | str | None = None,
+        reduced_priority: bool = False,
+        data: Mapping | None = None,
+        request_kwargs: Mapping | None = None,
+    ) -> Response:
+        """Undark the item.
+
+        :param comment: The curation comment explaining reason for
+                        undarking item
+
+        :param priority: The task priority.
+
+        :param reduced_priority: Submit your derive at a lower priority.
+                                 This option is helpful to get around rate-limiting.
+                                 Your task will more likely be accepted, but it might
+                                 not run for a long time. Note that you still may be
+                                 subject to rate-limiting. This is different than
+                                 ``priority`` in that it will allow you to possibly
+                                 avoid rate-limiting.
+
+        :param data: Additional parameters to submit with
+                     the task.
+
+        :returns: :class:`requests.Response`
+        """
+        r = self.session.submit_task(
+            self.identifier,
+            'make_undark.php',
+            comment=comment,
+            priority=priority,
+            data=data,
+            reduced_priority=reduced_priority,
+            request_kwargs=request_kwargs,
+        )
+        r.raise_for_status()
+        return r
+
+    # TODO: dark and undark have different order for data and reduced_pripoity
+    def dark(
+        self,
+        comment: str,
+        priority: int | str | None = None,
+        data: Mapping | None = None,
+        reduced_priority: bool = False,
+        request_kwargs: Mapping | None = None,
+    ) -> Response:
+        """Dark the item.
+
+        :param comment: The curation comment explaining reason for
+                        darking item
+
+        :param priority: The task priority.
+
+        :param reduced_priority: Submit your derive at a lower priority.
+                                 This option is helpful to get around rate-limiting.
+                                 Your task will more likely be accepted, but it might
+                                 not run for a long time. Note that you still may be
+                                 subject to rate-limiting. This is different than
+                                 ``priority`` in that it will allow you to possibly
+                                 avoid rate-limiting.
+
+        :param data: Additional parameters to submit with
+                     the task.
+
+        :returns: :class:`requests.Response`
+        """
+        r = self.session.submit_task(
+            self.identifier,
+            'make_dark.php',
+            comment=comment,
+            priority=priority,
+            data=data,
+            reduced_priority=reduced_priority,
+            request_kwargs=request_kwargs,
+        )
+        r.raise_for_status()
+        return r
+
+    def get_review(self) -> Response:
+        """Get review written by the current user for this item.
+        Use `Item.reviews` or `Item.item_metadata['reviews']` to get all reviews for this item.
+
+        :returns: :class:`requests.Response` containing review data as JSON.
+        :raises HTTPError: If the request fails.
+        """
+        u = f'{self.session.protocol}//{self.session.host}/services/reviews.php'
+        p = {'identifier': self.identifier}
+        a = S3Auth(self.session.access_key, self.session.secret_key)
+        r = self.session.get(u, params=p, auth=a)
+        r.raise_for_status()
+        return r
+
+    def index_review(self, username=None, screenname=None, itemname=None) -> Response:
+        """Mark a review as indexable (visible in search results).
+
+        Specify exactly one of ``username``, ``screenname``, or ``itemname``
+        to identify which review to index.
+
+        :param username: The username of the reviewer.
+        :param screenname: The screen name of the reviewer.
+        :param itemname: The item name associated with the review.
+
+        :returns: :class:`requests.Response`
+        :raises HTTPError: If the request fails.
+        """
+        u = f'{self.session.protocol}//{self.session.host}/services/reviews.php'
+        p = {'identifier': self.identifier}
+        d = {'noindex': '0'}
+        if username:
+            d['username'] = username
+        elif screenname:
+            d['screenname'] = screenname
+        elif itemname:
+            d['itemname'] = itemname
+        a = S3Auth(self.session.access_key, self.session.secret_key)
+        r = self.session.put(u, params=p, data=d, auth=a)
+        r.raise_for_status()
+        return r
+
+    def noindex_review(self, username=None, screenname=None, itemname=None) -> Response:
+        """Mark a review as non-indexable (hidden from search results).
+
+        Specify exactly one of ``username``, ``screenname``, or ``itemname``
+        to identify which review to hide.
+
+        :param username: The username of the reviewer.
+        :param screenname: The screen name of the reviewer.
+        :param itemname: The item name associated with the review.
+
+        :returns: :class:`requests.Response`
+        :raises HTTPError: If the request fails.
+        """
+        u = f'{self.session.protocol}//{self.session.host}/services/reviews.php'
+        p = {'identifier': self.identifier}
+        d = {'noindex': '1'}
+        if username:
+            d['username'] = username
+        elif screenname:
+            d['screenname'] = screenname
+        elif itemname:
+            d['itemname'] = itemname
+        a = S3Auth(self.session.access_key, self.session.secret_key)
+        r = self.session.put(u, params=p, data=d, auth=a)
+        r.raise_for_status()
+        return r
+
+    def delete_review(self, username=None, screenname=None, itemname=None) -> Response:
+        """Delete a review from this item.
+
+        Specify exactly one of ``username``, ``screenname``, or ``itemname``
+        to identify which review to delete.
+
+        :param username: The username of the reviewer.
+        :param screenname: The screen name of the reviewer.
+        :param itemname: The item name associated with the review.
+
+        :returns: :class:`requests.Response`
+        :raises HTTPError: If the request fails.
+        """
+        u = f'{self.session.protocol}//{self.session.host}/services/reviews.php'
+        p = {'identifier': self.identifier}
+        d = None
+        if username:
+            d = {'username': username}
+        elif screenname:
+            d = {'screenname': screenname}
+        elif itemname:
+            d = {'itemname': itemname}
+        a = S3Auth(self.session.access_key, self.session.secret_key)
+        r = self.session.delete(u, params=p, data=d, auth=a)
+        r.raise_for_status()
+        return r
+
+    def review(self, title, body, stars=None) -> Response:
+        """Submit a review for this item.
+
+        :param title: The title of the review.
+        :param body: The body text of the review.
+        :param stars: Optional star rating (typically 1-5).
+
+        :returns: :class:`requests.Response`
+        :raises HTTPError: If the request fails.
+        """
+        u = f'{self.session.protocol}//{self.session.host}/services/reviews.php'
+        p = {'identifier': self.identifier}
+        d = {'title': title, 'body': body}
+        if stars:
+            d['stars'] = stars
+        a = S3Auth(self.session.access_key, self.session.secret_key)
+        r = self.session.post(u, params=p, json=d, auth=a)
+        r.raise_for_status()
+        return r
+
+    def get_file(self, file_name: str, file_metadata: Mapping | None = None) -> File:
         """Get a :class:`File <File>` object for the named file.
 
-        :rtype: :class:`internetarchive.File <File>`
-        :returns: An :class:`internetarchive.File <File>` object.
+        :param file_metadata: a dict of metadata for the
+                              given file.
 
-        :type file_metadata: dict
-        :param file_metadata: (optional) a dict of metadata for the
-                              given fille.
+        :returns: An :class:`internetarchive.File <File>` object.
         """
         return File(self, file_name, file_metadata)
 
-    def get_files(self, files=None, formats=None, glob_pattern=None, on_the_fly=None):
-        files = [] if not files else files
-        formats = [] if not formats else formats
-        on_the_fly = False if not on_the_fly else True
+    def get_files(
+        self,
+        files: File | list[File] | None = None,
+        formats: str | list[str] | None = None,
+        glob_pattern: str | list[str] | None = None,
+        exclude_pattern: str | list[str] | None = None,
+        on_the_fly: bool = False,
+    ):
+        """Get files from the item, optionally filtered by various criteria.
+
+        :param files: Only return files matching these filenames.
+        :param formats: Only return files matching these formats
+                       (e.g., ``'JPEG'``, ``'Ogg Vorbis'``).
+        :param glob_pattern: Only return files matching this glob pattern
+                            (e.g., ``'*.mp4'``). Multiple patterns can be
+                            separated by ``|``, passed as a list, or a
+                            mix of both (e.g., ``['*.mp4|*.xml', '*.jpg']``).
+        :param exclude_pattern: Exclude files matching this glob pattern.
+                               Multiple patterns can be separated by ``|``,
+                               passed as a list, or a mix of both.
+        :param on_the_fly: Include on-the-fly derivative files (EPUB, MOBI,
+                          DAISY, MARCXML) that are generated on request.
+
+        :yields: :class:`File` objects matching the specified criteria.
+
+        Usage::
+
+            >>> item = get_item('nasa')
+            >>> for f in item.get_files(formats='JPEG'):
+            ...     print(f.name)
+        """
+        files = files or []
+        formats = formats or []
+        exclude_pattern = exclude_pattern or ''
+        on_the_fly = bool(on_the_fly)
 
         if not isinstance(files, (list, tuple, set)):
             files = [files]
@@ -241,150 +717,270 @@ class Item(BaseItem):
         # Add support for on-the-fly files (e.g. EPUB).
         if on_the_fly:
             otf_files = [
-                '{0}.epub'.format(self.identifier),
-                '{0}.mobi'.format(self.identifier),
-                '{0}_daisy.zip'.format(self.identifier),
-                '{0}_archive_marc.xml'.format(self.identifier),
+                ('EPUB', f'{self.identifier}.epub'),
+                ('MOBI', f'{self.identifier}.mobi'),
+                ('DAISY', f'{self.identifier}_daisy.zip'),
+                ('MARCXML', f'{self.identifier}_archive_marc.xml'),
             ]
-            for f in otf_files:
-                item_files.append(dict(name=f, otf=True))
+            for format, file_name in otf_files:
+                item_files.append({'name': file_name, 'format': format, 'otf': True})
 
         if not any(k for k in [files, formats, glob_pattern]):
             for f in item_files:
-                yield self.get_file(f.get('name'), file_metadata=f)
+                yield self.get_file(str(f.get('name')), file_metadata=f)
 
         for f in item_files:
             if f.get('name') in files:
-                yield self.get_file(f.get('name'))
+                yield self.get_file(str(f.get('name')))
             elif f.get('format') in formats:
-                yield self.get_file(f.get('name'))
+                yield self.get_file(str(f.get('name')))
             elif glob_pattern:
-                if not isinstance(glob_pattern, list):
-                    patterns = glob_pattern.split('|')
-                else:
-                    patterns = glob_pattern
+                patterns = flatten_pipe_patterns(glob_pattern)
+                exclude_patterns = flatten_pipe_patterns(exclude_pattern)
                 for p in patterns:
                     if fnmatch(f.get('name', ''), p):
-                        yield self.get_file(f.get('name'))
+                        if not any(
+                            fnmatch(f.get('name', ''), e) for e in exclude_patterns
+                        ):
+                            yield self.get_file(str(f.get('name')))
 
-    def download(self,
-                 files=None,
-                 formats=None,
-                 glob_pattern=None,
-                 dry_run=None,
-                 verbose=None,
-                 silent=None,
-                 ignore_existing=None,
-                 checksum=None,
-                 destdir=None,
-                 no_directory=None,
-                 retries=None,
-                 item_index=None,
-                 ignore_errors=None,
-                 on_the_fly=None,
-                 return_responses=None,
-                 no_change_timestamp=None):
+    def _download_range_jobs(
+        self,
+        range_jobs: list[tuple[str, str]],
+        headers: Mapping | None = None,
+        **kwargs,
+    ) -> list[Request | Response]:
+        """Stream partial (byte-range) downloads for an ordered list of jobs.
+
+        Each job is a ``(filename, range_header_value)`` tuple. Jobs are written
+        in order with **no** separator between them (``ors=False``), so the bytes
+        returned by the server are concatenated raw -- concatenated gzip members
+        (e.g. ``.warc.gz`` records) stay byte-adjacent and can be piped to
+        ``zcat``. The same file may appear more than once.
+
+        :param range_jobs: Ordered ``(filename, "bytes=...")`` tuples.
+        :param headers: Extra HTTP headers merged into each request (the per-job
+                        ``Range`` header takes precedence).
+        :param kwargs: Download options forwarded to :meth:`File.download`.
+        :returns: A list of responses if ``return_responses`` is set, else a list
+                  of the filenames whose download failed (empty if all succeeded),
+                  mirroring :meth:`download`.
+        """
+        base_headers = dict(headers) if headers else {}
+        return_responses = kwargs.get("return_responses")
+        responses = []
+        errors = []
+        for name, byte_range in range_jobs:
+            f = self.get_file(name)
+            if kwargs.get("dry_run"):
+                print(f.url)
+                continue
+            r = f.download(
+                f.name,
+                verbose=kwargs.get("verbose"),
+                ignore_existing=kwargs.get("ignore_existing"),
+                checksum=kwargs.get("checksum"),
+                checksum_archive=kwargs.get("checksum_archive"),
+                destdir=kwargs.get("destdir"),
+                retries=kwargs.get("retries"),
+                ignore_errors=kwargs.get("ignore_errors"),
+                fileobj=kwargs.get("fileobj"),
+                return_responses=return_responses,
+                no_change_timestamp=kwargs.get("no_change_timestamp"),
+                params=kwargs.get("params"),
+                stdout=kwargs.get("stdout"),
+                ors=False,  # raw concatenation, no separator between segments
+                timeout=kwargs.get("timeout"),
+                headers={**base_headers, "Range": byte_range},
+                count_views=kwargs.get("count_views", False),
+            )
+            if return_responses:
+                responses.append(r)
+            if r is False:
+                errors.append(f.name)
+        return responses if return_responses else errors
+
+    # ruff: noqa: PLR0912, PLR0913
+    def download(
+        self,
+        files: File | list[File] | None = None,
+        formats: str | list[str] | None = None,
+        glob_pattern: str | list[str] | None = None,
+        exclude_pattern: str | list[str] | None = None,
+        dry_run: bool = False,
+        verbose: bool = False,
+        ignore_existing: bool = False,
+        checksum: bool = False,
+        checksum_archive: bool = False,
+        destdir: str | None = None,
+        no_directory: bool = False,
+        retries: int | None = None,
+        item_index: int | None = None,
+        ignore_errors: bool = False,
+        on_the_fly: bool = False,
+        return_responses: bool = False,
+        no_change_timestamp: bool = False,
+        ignore_history_dir: bool = False,
+        source: str | list[str] | None = None,
+        exclude_source: str | list[str] | None = None,
+        stdout: bool = False,
+        params: Mapping | None = None,
+        timeout: float | tuple[int, float] | None = None,
+        count_views: bool = False,
+        headers: Mapping | None = None,
+        range_jobs: list[tuple[str, str]] | None = None,
+    ) -> list[Request | Response]:
         """Download files from an item.
 
-        :param files: (optional) Only download files matching given file names.
+        :param files: Only download files matching given file names.
 
-        :type formats: str
-        :param formats: (optional) Only download files matching the given
+        :param formats: Only download files matching the given
                         Formats.
 
-        :type glob_pattern: str
-        :param glob_pattern: (optional) Only download files matching the given
-                             glob pattern.
+        :param glob_pattern: Only download files matching the given
+                             glob pattern. Multiple patterns can be
+                             separated by ``|``, passed as a list, or a
+                             mix of both.
 
-        :type dry_run: bool
-        :param dry_run: (optional) Output download URLs to stdout, don't
+        :param exclude_pattern: Exclude files matching the given glob pattern.
+                                Multiple patterns can be separated by ``|``,
+                                passed as a list, or a mix of both.
+
+        :param dry_run: Output download URLs to stdout, don't
                         download anything.
 
-        :type verbose: bool
-        :param verbose: (optional) Turn on verbose output.
+        :param verbose: Turn on verbose output.
 
-        :type silent: bool
-        :param silent: (optional) Suppress all output.
-
-        :type ignore_existing: bool
-        :param ignore_existing: (optional) Skip files that already exist
+        :param ignore_existing: Skip files that already exist
                                 locally.
 
-        :type checksum: bool
-        :param checksum: (optional) Skip downloading file based on checksum.
+        :param checksum: Skip downloading file based on checksum.
 
-        :type destdir: str
-        :param destdir: (optional) The directory to download files to.
+        :param checksum_archive: Skip downloading file based on checksum, and skip
+                                 checksum validation if it already succeeded
+                                 (will create and use _checksum_archive.txt).
 
-        :type no_directory: bool
-        :param no_directory: (optional) Download files to current working
+        :param destdir: The directory to download files to.
+
+        :param no_directory: Download files to current working
                              directory rather than creating an item directory.
 
-        :type retries: int
-        :param retries: (optional) The number of times to retry on failed
+        :param retries: The number of times to retry on failed
                         requests.
 
-        :type item_index: int
-        :param item_index: (optional) The index of the item for displaying
+        :param item_index: The index of the item for displaying
                            progress in bulk downloads.
 
-        :type ignore_errors: bool
-        :param ignore_errors: (optional) Don't fail if a single file fails to
+        :param ignore_errors: Don't fail if a single file fails to
                               download, continue to download other files.
 
-        :type on_the_fly: bool
-        :param on_the_fly: (optional) Download on-the-fly files (i.e. derivative EPUB,
+        :param on_the_fly: Download on-the-fly files (i.e. derivative EPUB,
                            MOBI, DAISY files).
 
-        :type return_responses: bool
-        :param return_responses: (optional) Rather than downloading files to disk, return
+        :param return_responses: Rather than downloading files to disk, return
                                  a list of response objects.
 
-        :type no_change_timestamp: bool
-        :param no_change_timestamp: (optional) If True, leave the time stamp as the
+        :param no_change_timestamp: If True, leave the time stamp as the
                                     current time instead of changing it to that given in
                                     the original archive.
 
-        :rtype: bool
+        :param source: Filter files based on their source value in files.xml
+                       (i.e. `original`, `derivative`, `metadata`).
+
+        :param exclude_source: Filter files based on their source value in files.xml
+                               (i.e. `original`, `derivative`, `metadata`).
+
+        :param params: URL parameters to send with the download request.
+                       By default the library injects ``cnt=0`` so downloads do
+                       not count toward archive.org view counts; pass
+                       ``count_views=True`` to omit it. An explicit ``cnt`` key
+                       in ``params`` always wins.
+
+        :param count_views: If True, omit the default ``cnt=0`` parameter so
+                            downloads count toward archive.org view counts.
+
+        :param headers: Extra HTTP headers to send with each download request.
+                        Supplying a ``Range`` header (e.g.
+                        ``{'Range': 'bytes=0-1023'}``) performs an intentional
+                        partial fetch, skipping resume and full-file checksum
+                        validation.
+
+        :param range_jobs: An ordered list of ``(filename, range_header_value)``
+                           tuples for partial (byte-range) downloads, e.g.
+                           ``[('a.warc.gz', 'bytes=0-1023')]``. Intended for use
+                           with ``stdout=True``: each job is streamed in order
+                           with **no** separator between them (raw
+                           concatenation), so the same file may appear more than
+                           once. When set, this supersedes ``files``/``formats``/
+                           ``glob_pattern`` selection.
+
+        :param ignore_history_dir: Do not download any files from the history
+                                   dir. This param defaults to ``False``.
+
         :returns: True if if all files have been downloaded successfully.
         """
-        dry_run = False if dry_run is None else dry_run
-        verbose = False if verbose is None else verbose
-        silent = False if silent is None else silent
-        ignore_existing = False if ignore_existing is None else ignore_existing
-        ignore_errors = False if not ignore_errors else ignore_errors
-        checksum = False if checksum is None else checksum
-        no_directory = False if no_directory is None else no_directory
-        return_responses = False if not return_responses else True
-        no_change_timestamp = False if not no_change_timestamp else no_change_timestamp
+        dry_run = bool(dry_run)
+        verbose = bool(verbose)
+        ignore_existing = bool(ignore_existing)
+        ignore_errors = bool(ignore_errors)
+        checksum = bool(checksum)
+        checksum_archive = bool(checksum_archive)
+        no_directory = bool(no_directory)
+        return_responses = bool(return_responses)
+        no_change_timestamp = bool(no_change_timestamp)
+        ignore_history_dir = bool(ignore_history_dir)
+        params = params or None
+        if source:
+            if not isinstance(source, list):
+                source = [source]
+        if exclude_source:
+            if not isinstance(exclude_source, list):
+                exclude_source = [exclude_source]
+        if stdout:
+            fileobj = os.fdopen(sys.stdout.fileno(), "wb", closefd=False)
+            verbose = False
+        else:
+            fileobj = None
 
         if not dry_run:
-            if item_index and verbose is True:
-                print('{0} ({1}):'.format(self.identifier, item_index))
-            elif item_index and silent is False:
-                print('{0} ({1}): '.format(self.identifier, item_index), end='')
-            elif item_index is None and verbose is True:
-                print('{0}:'.format(self.identifier))
-            elif item_index is None and silent is False:
-                print(self.identifier, end=': ')
-            sys.stdout.flush()
+            if item_index and verbose:
+                print(f'{self.identifier} ({item_index}):', file=sys.stderr)
+            elif item_index is None and verbose:
+                print(f'{self.identifier}:', file=sys.stderr)
 
-        if self.is_dark is True:
-            msg = 'skipping {0}, item is dark'.format(self.identifier)
+        if self.is_dark:
+            msg = f'skipping {self.identifier}, item is dark'
             log.warning(msg)
             if verbose:
-                print(' ' + msg)
-            elif silent is False:
-                print(msg)
-            return
+                print(f' {msg}', file=sys.stderr)
+            return []
         elif self.metadata == {}:
-            msg = 'skipping {0}, item does not exist.'.format(self.identifier)
+            msg = f'skipping {self.identifier}, item does not exist.'
             log.warning(msg)
             if verbose:
-                print(' ' + msg)
-            elif silent is False:
-                print(msg)
-            return
+                print(f' {msg}', file=sys.stderr)
+            return []
+
+        if range_jobs:
+            return self._download_range_jobs(
+                range_jobs,
+                headers=headers,
+                verbose=verbose,
+                ignore_existing=ignore_existing,
+                checksum=checksum,
+                checksum_archive=checksum_archive,
+                destdir=destdir,
+                retries=retries,
+                ignore_errors=ignore_errors,
+                fileobj=fileobj,
+                return_responses=return_responses,
+                no_change_timestamp=no_change_timestamp,
+                params=params,
+                stdout=stdout,
+                timeout=timeout,
+                count_views=count_views,
+                dry_run=dry_run,
+            )
 
         if files:
             files = self.get_files(files, on_the_fly=on_the_fly)
@@ -393,108 +989,181 @@ class Item(BaseItem):
         if formats:
             files = self.get_files(formats=formats, on_the_fly=on_the_fly)
         if glob_pattern:
-            files = self.get_files(glob_pattern=glob_pattern, on_the_fly=on_the_fly)
+            files = self.get_files(
+                glob_pattern=glob_pattern,
+                exclude_pattern=exclude_pattern,
+                on_the_fly=on_the_fly,
+            )
+        if stdout:
+            files = list(files)  # type: ignore
 
-        if not files:
-            msg = 'skipping {0}, no matching files found.'.format(self.identifier)
-            log.info(msg)
-            if verbose:
-                print(' ' + msg)
-            elif silent is False:
-                print(msg, end='')
+        errors = []
+        downloaded = 0
+        responses = []
+        file_count = 0
 
-        errors = list()
-        responses = list()
-        for f in files:
+        for f in files:  # type: ignore
+            if ignore_history_dir is True:
+                if f.name.startswith('history/'):
+                    continue
+            if source and not any(f.source == x for x in source):
+                continue
+            if exclude_source and any(f.source == x for x in exclude_source):
+                continue
+            file_count += 1
             if no_directory:
                 path = f.name
             else:
-                path = os.path.join(self.identifier, f.name)
+                # Use forward slash as logical separator even on Windows so that
+                # downstream sanitization treats backslashes inside remote filenames as data.
+                if os.name == 'nt':
+                    path = f'{self.identifier}/{f.name}'
+                else:
+                    path = os.path.join(str(self.identifier), f.name)
             if dry_run:
                 print(f.url)
                 continue
-            r = f.download(path, verbose, silent, ignore_existing, checksum, destdir,
-                           retries, ignore_errors, None, return_responses,
-                           no_change_timestamp)
+            if stdout and file_count < len(files):  # type: ignore
+                ors = True
+            else:
+                ors = False
+            try:
+                r = f.download(
+                    path,
+                    verbose,
+                    ignore_existing,
+                    checksum,
+                    checksum_archive,
+                    destdir,
+                    retries,
+                    ignore_errors,
+                    fileobj,
+                    return_responses,
+                    no_change_timestamp,
+                    params,
+                    None,
+                    stdout,
+                    ors,
+                    timeout,
+                    headers=headers,
+                    count_views=count_views,
+                )
+            except exceptions.DirectoryTraversalError as exc:  # type: ignore
+                # Record error and continue; do not abort entire download batch.
+                msg = f'error: {exc}'
+                log.error(msg)
+                # Always surface to stderr so user sees the skip.
+                print(f' {msg}', file=sys.stderr)
+                errors.append(f.name)
+                continue
             if return_responses:
                 responses.append(r)
+
             if r is False:
                 errors.append(f.name)
-        if silent is False and verbose is False and dry_run is False:
-            if errors:
-                print(' - errors')
             else:
-                print(' - success')
-        if return_responses:
-            return responses
-        else:
-            return errors
+                downloaded += 1
 
-    def modify_metadata(self, metadata,
-                        target=None,
-                        append=None,
-                        append_list=None,
-                        priority=None,
-                        access_key=None,
-                        secret_key=None,
-                        debug=None,
-                        request_kwargs=None):
+        if file_count == 0:
+            msg = f'skipping {self.identifier}, no matching files found.'
+            log.info(msg)
+            if verbose:
+                print(f' {msg}', file=sys.stderr)
+            return []
+
+        return responses if return_responses else errors
+
+    def modify_metadata(
+        self,
+        metadata: Mapping,
+        target: str | None = None,
+        append: bool = False,
+        expect: Mapping | None = None,
+        append_list: bool = False,
+        insert: bool = False,
+        priority: int = 0,
+        access_key: str | None = None,
+        secret_key: str | None = None,
+        debug: bool = False,
+        headers: Mapping | None = None,
+        reduced_priority: bool = False,
+        request_kwargs: Mapping | None = None,
+        timeout: float | None = None,
+        refresh: bool = True,
+    ) -> Request | Response:
         """Modify the metadata of an existing item on Archive.org.
 
         Note: The Metadata Write API does not yet comply with the
         latest Json-Patch standard. It currently complies with `version 02
         <https://tools.ietf.org/html/draft-ietf-appsawg-json-patch-02>`__.
 
-        :type metadata: dict
         :param metadata: Metadata used to update the item.
 
-        :type target: str
-        :param target: (optional) Set the metadata target to update.
+        :param target: Set the metadata target to update.
 
-        :type priority: int
-        :param priority: (optional) Set task priority.
+        :param priority: Set task priority.
 
-        :type append: bool
-        :param append: (optional) Append value to an existing multi-value
+        :param append: Append value to an existing multi-value
                        metadata field.
 
-        :type append_list: bool
-        :param append_list: (optional) Append values to an existing multi-value
+        :param expect: Provide a dict of expectations to be tested
+                       server-side before applying patch to item metadata.
+
+        :param append_list: Append values to an existing multi-value
                             metadata field. No duplicate values will be added.
+
+        :param refresh: Refresh the item metadata after the request.
+
+        :param reduced_priority: Submit your task at a lower priority.
+                                 This option is helpful to get around rate-limiting.
+                                 Your task will more likely be accepted, but it might
+                                 not run for a long time. Note that you still may be
+                                 subject to rate-limiting.
+
+        :returns: A Request if debug else a Response.
 
         Usage::
 
             >>> import internetarchive
             >>> item = internetarchive.Item('mapi_test_item1')
-            >>> md = dict(new_key='new_value', foo=['bar', 'bar2'])
+            >>> md = {'new_key': 'new_value', 'foo': ['bar', 'bar2']}
             >>> item.modify_metadata(md)
-
-        :rtype: dict
-        :returns: A dictionary containing the status_code and response
-                  returned from the Metadata API.
         """
-        target = 'metadata' if target is None else target
-        append = False if append is None else append
-        access_key = self.session.access_key if not access_key else access_key
-        secret_key = self.session.secret_key if not secret_key else secret_key
-        debug = False if debug is None else debug
-        request_kwargs = {} if not request_kwargs else request_kwargs
+        append = bool(append)
+        access_key = access_key or self.session.access_key
+        secret_key = secret_key or self.session.secret_key
+        debug = bool(debug)
+        headers = headers or {}
+        expect = expect or {}
+        request_kwargs = request_kwargs or {}
+        if timeout:
+            request_kwargs["timeout"] = float(timeout)  # type: ignore
+        else:
+            request_kwargs["timeout"] = 60  # type: ignore
 
-        url = '{protocol}//archive.org/metadata/{identifier}'.format(
-            protocol=self.session.protocol,
-            identifier=self.identifier)
+        _headers = self.session.headers.copy()
+        _headers.update(headers)
+
+        url = f'{self.session.protocol}//{self.session.host}/metadata/{self.identifier}'
+        # TODO: currently files and metadata targets do not support dict's,
+        # but they might someday?? refactor this check.
+        source_metadata = self.item_metadata
         request = MetadataRequest(
             method='POST',
             url=url,
             metadata=metadata,
-            headers=self.session.headers,
-            source_metadata=self.item_metadata.get(target.split('/')[0], {}),
+            headers=_headers,
+            source_metadata=source_metadata,
             target=target,
             priority=priority,
             access_key=access_key,
             secret_key=secret_key,
             append=append,
-            append_list=append_list)
+            expect=expect,
+            append_list=append_list,
+            insert=insert,
+            reduced_priority=reduced_priority,
+        )
         # Must use Session.prepare_request to make sure session settings
         # are used on request!
         prepared_request = request.prepare()
@@ -502,68 +1171,140 @@ class Item(BaseItem):
             return prepared_request
         resp = self.session.send(prepared_request, **request_kwargs)
         # Re-initialize the Item object with the updated metadata.
-        self.refresh()
+        if refresh:
+            self.refresh()
         return resp
 
-    def upload_file(self, body,
-                    key=None,
-                    metadata=None,
-                    headers=None,
-                    access_key=None,
-                    secret_key=None,
-                    queue_derive=None,
-                    verbose=None,
-                    verify=None,
-                    checksum=None,
-                    delete=None,
-                    retries=None,
-                    retries_sleep=None,
-                    debug=None,
-                    request_kwargs=None):
+    def delete_flag(
+        self,
+        category: str,
+        user: str | None = None,
+    ) -> Response:
+        """Delete a flag from this item.
+
+        :param category: The flag category to delete.
+        :param user: The user who set the flag. Defaults to the current
+                    user's screenname prefixed with ``@``.
+
+        :returns: :class:`requests.Response`
+        """
+        if user is None:
+            user = f"@{self.session.config.get('general', {}).get('screenname')}"
+        url = f'{self.session.protocol}//{self.session.host}/services/flags/admin.php'
+        headers = {'Accept': 'text/json'}  # must be text/json specifically
+        params = {'identifier': self.identifier, 'category': category, 'user': user}
+        r = self.session.delete(url, headers=headers, params=params)
+        return r
+
+    def add_flag(
+        self,
+        category: str,
+        user: str | None = None,
+    ) -> Response:
+        """Add a flag to this item.
+
+        :param category: The flag category to add.
+        :param user: The user adding the flag. Defaults to the current
+                    user's screenname prefixed with ``@``.
+
+        :returns: :class:`requests.Response`
+        """
+        if user is None:
+            user = f"@{self.session.config.get('general', {}).get('screenname')}"
+        url = f'{self.session.protocol}//{self.session.host}/services/flags/admin.php'
+        headers = {'Accept': 'text/json'}  # must be text/json specifically
+        params = {'identifier': self.identifier, 'category': category, 'user': user}
+        r = self.session.put(url, headers=headers, params=params)
+        return r
+
+    def get_flags(self) -> Response:
+        """Get all flags for this item.
+
+        :returns: :class:`requests.Response` containing flag data as JSON.
+        """
+        url = f'{self.session.protocol}//{self.session.host}/services/flags/admin.php'
+        headers = {'Accept': 'text/json'}  # must be text/json specifically
+        params = {'identifier': self.identifier}
+        r = self.session.get(url, headers=headers, params=params)
+        return r
+
+    # TODO: `list` parameter name shadows the Python builtin
+    def remove_from_simplelist(self, parent, list) -> Response:
+        """Remove item from a simplelist.
+
+        :returns: :class:`requests.Response`
+        """
+        patch = {
+            'op': 'delete',
+            'parent': parent,
+            'list': list,
+        }
+        data = {
+            '-patch': json.dumps(patch),
+            '-target': 'simplelists',
+        }
+        r = self.session.post(self.urls.metadata, data=data)  # type: ignore
+        return r
+
+    def upload_file(  # noqa: PLR0915, C901 TODO: Refactor this method to reduce complexity
+        self,
+        body,
+        key: str | None = None,
+        metadata: Mapping | None = None,
+        file_metadata: Mapping | None = None,
+        headers: dict | None = None,
+        access_key: str | None = None,
+        secret_key: str | None = None,
+        queue_derive: bool = False,
+        verbose: bool = False,
+        verify: bool = False,
+        checksum: bool = False,
+        delete: bool = False,
+        retries: int | None = None,
+        retries_sleep: int | None = None,
+        debug: bool = False,
+        validate_identifier: bool = False,
+        request_kwargs: MutableMapping | None = None,
+    ) -> Request | Response:
         """Upload a single file to an item. The item will be created
         if it does not exist.
 
-        :type body: Filepath or file-like object.
-        :param body: File or data to be uploaded.
+        :param body: File or data to be uploaded (filepath or file-like object).
 
-        :type key: str
-        :param key: (optional) Remote filename.
+        :param key: Remote filename.
 
-        :type metadata: dict
-        :param metadata: (optional) Metadata used to create a new item.
+        :param metadata: Metadata used to create a new item.
 
-        :type headers: dict
-        :param headers: (optional) Add additional IA-S3 headers to request.
+        :param file_metadata: File-level metadata to add to
+                              the files.xml entry for the file being
+                              uploaded.
 
-        :type queue_derive: bool
-        :param queue_derive: (optional) Set to False to prevent an item from
+        :param headers: Add additional IA-S3 headers to request.
+
+        :param queue_derive: Set to False to prevent an item from
                              being derived after upload.
 
-        :type verify: bool
-        :param verify: (optional) Verify local MD5 checksum matches the MD5
+        :param verify: Verify local MD5 checksum matches the MD5
                        checksum of the file received by IAS3.
 
-        :type checksum: bool
-        :param checksum: (optional) Skip based on checksum.
+        :param checksum: Skip based on checksum.
 
-        :type delete: bool
-        :param delete: (optional) Delete local file after the upload has been
+        :param delete: Delete local file after the upload has been
                        successfully verified.
 
-        :type retries: int
-        :param retries: (optional) Number of times to retry the given request
+        :param retries: Number of times to retry the given request
                         if S3 returns a 503 SlowDown error.
 
-        :type retries_sleep: int
-        :param retries_sleep: (optional) Amount of time to sleep between
-                              ``retries``.
+        :param retries_sleep: Amount of time to sleep between
+                              ``retries``, in seconds.
 
-        :type verbose: bool
-        :param verbose: (optional) Print progress to stdout.
+        :param verbose: Print progress to stdout.
 
-        :type debug: bool
-        :param debug: (optional) Set to True to print headers to stdout, and
+        :param debug: Set to True to print headers to stdout, and
                       exit without sending the upload request.
+
+        :param validate_identifier: Set to True to validate the identifier before
+                                    uploading the file.
 
         Usage::
 
@@ -574,63 +1315,65 @@ class Item(BaseItem):
             True
         """
         # Set defaults.
-        headers = {} if headers is None else headers
-        metadata = {} if metadata is None else metadata
-        access_key = self.session.access_key if access_key is None else access_key
-        secret_key = self.session.secret_key if secret_key is None else secret_key
-        queue_derive = True if queue_derive is None else queue_derive
-        verbose = False if verbose is None else verbose
-        verify = True if verify is None else verify
-        delete = False if delete is None else delete
+        headers = headers or {}
+        metadata = metadata or {}
+        file_metadata = file_metadata or {}
+        access_key = access_key or self.session.access_key
+        secret_key = secret_key or self.session.secret_key
+        queue_derive = bool(queue_derive)
+        verbose = bool(verbose)
+        verify = bool(verify)
+        delete = bool(delete)
         # Set checksum after delete.
-        checksum = True if delete else checksum
-        retries = 0 if retries is None else retries
-        retries_sleep = 30 if retries_sleep is None else retries_sleep
-        debug = False if debug is None else debug
-        request_kwargs = {} if request_kwargs is None else request_kwargs
+        checksum = delete or checksum
+        retries = retries or 0
+        retries_sleep = retries_sleep or 30
+        debug = bool(debug)
+        validate_identifier = bool(validate_identifier)
+        request_kwargs = request_kwargs or {}
         if 'timeout' not in request_kwargs:
             request_kwargs['timeout'] = 120
         md5_sum = None
+
+        _headers = self.session.headers.copy()
+        _headers.update(headers)
 
         if not hasattr(body, 'read'):
             filename = body
             body = open(body, 'rb')
         else:
-            if key:
-                filename = key
-            else:
-                filename = body.name
+            filename = key or body.name
 
         size = get_file_size(body)
 
         # Support for uploading empty files.
         if size == 0:
-            headers['Content-Length'] = '0'
+            _headers['Content-Length'] = '0'
 
-        if not headers.get('x-archive-size-hint'):
-            headers['x-archive-size-hint'] = str(size)
+        if not _headers.get('x-archive-size-hint'):
+            _headers['x-archive-size-hint'] = str(size)
 
         # Build IA-S3 URL.
+        if validate_identifier:
+            validate_s3_identifier(self.identifier or "")
         key = norm_filepath(filename).split('/')[-1] if key is None else key
-        base_url = '{0.session.protocol}//s3.us.archive.org/{0.identifier}'.format(self)
-        url = '{0}/{1}'.format(
-            base_url, urllib.parse.quote(norm_filepath(key).lstrip('/').encode('utf-8')))
+        base_url = f'{self.session.protocol}//s3.us.archive.org/{self.identifier}'
+        url = f'{base_url}/{quote(norm_filepath(key).lstrip("/").encode("utf-8"))}'
 
         # Skip based on checksum.
         if checksum:
             md5_sum = get_md5(body)
             ia_file = self.get_file(key)
             if (not self.tasks) and (ia_file) and (ia_file.md5 == md5_sum):
-                log.info('{f} already exists: {u}'.format(f=key, u=url))
+                log.info(f'{key} already exists: {url}')
                 if verbose:
-                    print(' {f} already exists, skipping.'.format(f=key))
+                    print(f' {key} already exists, skipping.', file=sys.stderr)
                 if delete:
                     log.info(
-                        '{f} successfully uploaded to '
-                        'https://archive.org/download/{i}/{f} '
-                        'and verified, deleting '
-                        'local copy'.format(i=self.identifier,
-                                            f=key))
+                        f'{key} successfully uploaded to '
+                        f'https://archive.org/download/{self.identifier}/{key} '
+                        'and verified, deleting local copy'
+                    )
                     body.close()
                     os.remove(filename)
                 # Return an empty response object if checksums match.
@@ -642,7 +1385,7 @@ class Item(BaseItem):
         if verify or delete:
             if not md5_sum:
                 md5_sum = get_md5(body)
-            headers['Content-MD5'] = md5_sum
+            _headers['Content-MD5'] = md5_sum
 
         def _build_request():
             body.seek(0, os.SEEK_SET)
@@ -654,28 +1397,42 @@ class Item(BaseItem):
                         raise Exception
 
                     chunk_size = 1048576
-                    expected_size = size / chunk_size + 1
+                    expected_size = math.ceil(size / chunk_size)
                     chunks = chunk_generator(body, chunk_size)
-                    progress_generator = progress.bar(
+                    progress_generator = tqdm(
                         chunks,
-                        expected_size=expected_size,
-                        label=' uploading {f}: '.format(f=key))
-                    data = IterableToFileAdapter(progress_generator, size)
-                except:
-                    print(' uploading {f}'.format(f=key))
+                        desc=f' uploading {key}',
+                        dynamic_ncols=True,
+                        total=expected_size,
+                        unit='MiB',
+                    )
+                    data = None
+                    # pre_encode is needed because http doesn't know that it
+                    # needs to encode a TextIO object when it's wrapped
+                    # in the Iterator from tqdm.
+                    # So, this FileAdapter provides pre-encoded output
+                    data = IterableToFileAdapter(
+                        progress_generator,
+                        size,
+                        pre_encode=isinstance(body, io.TextIOBase),
+                    )
+                except Exception:
+                    print(f' uploading {key}', file=sys.stderr)
                     data = body
             else:
                 data = body
 
-            headers.update(self.session.headers)
-            request = S3Request(method='PUT',
-                                url=url,
-                                headers=headers,
-                                data=data,
-                                metadata=metadata,
-                                access_key=access_key,
-                                secret_key=secret_key,
-                                queue_derive=queue_derive)
+            request = S3Request(
+                method='PUT',
+                url=url,
+                headers=_headers,
+                data=data,
+                metadata=metadata,
+                file_metadata=file_metadata,
+                access_key=access_key,
+                secret_key=secret_key,
+                queue_derive=queue_derive,
+            )
             return request
 
         if debug:
@@ -684,16 +1441,32 @@ class Item(BaseItem):
             return prepared_request
         else:
             try:
-                error_msg = ('s3 is overloaded, sleeping for '
-                             '{0} seconds and retrying. '
-                             '{1} retries left.'.format(retries_sleep, retries))
+                first_try = True
                 while True:
-                    if retries > 0:
-                        if self.session.s3_is_overloaded(access_key):
+                    error_msg = (
+                        's3 is overloaded, sleeping for '
+                        f'{retries_sleep} seconds and retrying. '
+                        f'{retries} retries left.'
+                    )
+                    if retries > 0 and not first_try:
+                        try:
+                            overloaded = self.session.s3_is_overloaded(
+                                access_key=access_key
+                            )
+                        except Exception as e:
+                            error_msg = (
+                                'error checking if s3 is overloaded via '
+                                's3.us.archive.org?check_limit=1, '
+                                f'exception raised: "{e}". '
+                                f'sleeping for {retries_sleep} seconds and '
+                                f'retrying. {retries} retries left.'
+                            )
+                            overloaded = True
+                        if overloaded:
                             sleep(retries_sleep)
                             log.info(error_msg)
                             if verbose:
-                                print(' warning: {0}'.format(error_msg), file=sys.stderr)
+                                print(f' warning: {error_msg}', file=sys.stderr)
                             retries -= 1
                             continue
                     request = _build_request()
@@ -705,69 +1478,158 @@ class Item(BaseItem):
                     if prepared_request.headers.get('transfer-encoding') == 'chunked':
                         del prepared_request.headers['transfer-encoding']
 
-                    response = self.session.send(prepared_request,
-                                                 stream=True,
-                                                 **request_kwargs)
+                    response = self.session.send(
+                        prepared_request, stream=True, **request_kwargs
+                    )
                     if (response.status_code == 503) and (retries > 0):
+                        if b'appears to be spam' in response.content:
+                            log.info('detected as spam, upload failed')
+                            break
                         log.info(error_msg)
                         if verbose:
-                            print(' warning: {0}'.format(error_msg), file=sys.stderr)
+                            print(f' warning: {error_msg}', file=sys.stderr)
                         sleep(retries_sleep)
                         retries -= 1
+                        first_try = False
                         continue
                     else:
                         if response.status_code == 503:
                             log.info('maximum retries exceeded, upload failed.')
                         break
                 response.raise_for_status()
-                log.info(u'uploaded {f} to {u}'.format(f=key, u=url))
+                log.info(f'uploaded {key} to {url}')
                 if delete and response.status_code == 200:
                     log.info(
-                        '{f} successfully uploaded to '
-                        'https://archive.org/download/{i}/{f} and verified, deleting '
-                        'local copy'.format(i=self.identifier, f=key))
+                        f'{key} successfully uploaded to '
+                        f'https://archive.org/download/{self.identifier}/{key} and verified, '
+                        'deleting local copy'
+                    )
                     body.close()
                     os.remove(filename)
-                body.close()
+                response.close()
                 return response
-            except HTTPError as exc:
-                body.close()
-                msg = get_s3_xml_text(exc.response.content)
-                error_msg = (' error uploading {0} to {1}, '
-                             '{2}'.format(key, self.identifier, msg))
+            except ConnectionResetError as exc:
+                # Get connection info from thread-local storage
+                conn_info = self.session.get_connection_info()
+
+                # Extract connection details
+                src_ip_port = conn_info.get('src', 'unknown')
+                dst_ip_port = conn_info.get('dst', 'unknown')
+                src_ip = conn_info.get('src_ip', 'unknown')
+                src_port = conn_info.get('src_port', 'unknown')
+                dst_ip = conn_info.get('dst_ip', 'unknown')
+                dst_port = conn_info.get('dst_port', 'unknown')
+
+                # Get other diagnostic info
+                ip = "unknown"
+                http_path = "unknown"
+                connection_header_value = "unknown"
+                pool_status = "unknown"
+
+                try:
+                    # Parse URL for hostname and path
+                    parsed_url = urlparse(prepared_request.url)
+                    http_path = parsed_url.path
+
+                    # Use resolved destination IP if available
+                    if dst_ip and dst_ip != 'unknown':
+                        ip = dst_ip
+                    elif parsed_url.hostname:
+                        hostname = parsed_url.hostname
+                        ip = socket.gethostbyname(hostname)
+
+                    # Check what Connection header was actually sent
+                    connection_header_value = prepared_request.headers.get(
+                        'Connection', 'not-set'
+                    )
+
+                    # Check if urllib3 pooled the connection for this host
+                    adapter = self.session.get_adapter(prepared_request.url)
+                    if hasattr(adapter, 'poolmanager'):
+                        pool_key = adapter.poolmanager._get_pool_key(  # noqa: SLF001
+                            prepared_request.url, None
+                        )
+                        pool = adapter.poolmanager.pools.get(pool_key)
+                        if pool:
+                            pool_status = f"requests={pool.num_requests}"
+                        else:
+                            pool_status = "no-pool"
+                    else:
+                        pool_status = "no-poolmanager"
+                except Exception:
+                    log.debug(
+                        'error gathering diagnostic info for connection reset error, '
+                        'Raising original exception.'
+                    )
+
+                # Construct enhanced error message with clear diagnostic context
+                error_msg = (
+                    f'Connection reset by peer while uploading {key} to '
+                    f'{self.identifier} (src: {src_ip_port}, dst: {dst_ip_port}, '
+                    f'path: {http_path}, UTC: {datetime.utcnow().isoformat()}, '
+                    f'Connection: {connection_header_value}, Pool: {pool_status})'
+                )
                 log.error(error_msg)
                 if verbose:
-                    print(' error uploading {0}: {1}'.format(key, msg), file=sys.stderr)
+                    print(f' error: {error_msg}', file=sys.stderr)
+
+                # Re-raise with enhanced message while preserving original traceback
+                raise ConnectionResetError(error_msg) from exc
+            except HTTPError as exc:
+                try:
+                    msg = get_s3_xml_text(exc.response.content)  # type: ignore
+                except (
+                    ExpatError
+                ):  # probably HTTP 500 error and response is invalid XML
+                    msg = (
+                        'IA S3 returned invalid XML '  # type: ignore
+                        f'(HTTP status code {exc.response.status_code}). '
+                        'This is a server side error which is either temporary, '
+                        'or requires the intervention of IA admins.'
+                    )
+
+                error_msg = f' error uploading {key} to {self.identifier}, {msg}'
+                log.error(error_msg)
+                if verbose:
+                    print(f' error uploading {key}: {msg}', file=sys.stderr)
                 # Raise HTTPError with error message.
                 raise type(exc)(error_msg, response=exc.response, request=exc.request)
+            finally:
+                body.close()
 
-    def upload(self, files,
-               metadata=None,
-               headers=None,
-               access_key=None,
-               secret_key=None,
-               queue_derive=None,
-               verbose=None,
-               verify=None,
-               checksum=None,
-               delete=None,
-               retries=None,
-               retries_sleep=None,
-               debug=None,
-               request_kwargs=None):
-        """Upload files to an item. The item will be created if it
+    def upload(
+        self,
+        files,
+        metadata: Mapping | None = None,
+        headers: dict | None = None,
+        access_key: str | None = None,
+        secret_key: str | None = None,
+        queue_derive=None,  # TODO: True if None??
+        verbose: bool = False,
+        verify: bool = False,
+        checksum: bool = False,
+        delete: bool = False,
+        retries: int | None = None,
+        retries_sleep: int | None = None,
+        debug: bool = False,
+        validate_identifier: bool = False,
+        request_kwargs: dict | None = None,
+    ) -> list[Request | Response]:
+        r"""Upload files to an item. The item will be created if it
         does not exist.
 
-        :type files: str, file, list, tuple, dict
-        :param files: The filepaths or file-like objects to upload.
+        :param files: The filepaths or file-like objects to upload
+                     (str, file, list, tuple, or dict).
 
         :param \*\*kwargs: Optional arguments that :func:`Item.upload_file()` takes.
+
+        :returns: A list of :class:`requests.Response` objects.
 
         Usage::
 
             >>> import internetarchive
             >>> item = internetarchive.Item('identifier')
-            >>> md = dict(mediatype='image', creator='Jake Johnson')
+            >>> md = {'mediatype': 'image', 'creator': 'Jake Johnson'}
             >>> item.upload('/path/to/image.jpg', metadata=md, queue_derive=False)
             [<Response [200]>]
 
@@ -780,9 +1642,9 @@ class Item(BaseItem):
         Uploading file objects:
 
             >>> import io
-            >>> f = io.BytesIO(b"some initial binary data: \\x00\\x01")
+            >>> f = io.BytesIO(b'some initial binary data: \x00\x01')
             >>> r = item.upload({'remote-name.txt': f})
-            >>> f = io.BytesIO(b"some more binary data: \\x00\\x01")
+            >>> f = io.BytesIO(b'some more binary data: \x00\x01')
             >>> f.name = 'remote-name.txt'
             >>> r = item.upload(f)
 
@@ -792,26 +1654,42 @@ class Item(BaseItem):
         Setting the remote filename with a dict::
 
             >>> r = item.upload({'remote-name.txt': '/path/to/local/file.txt'})
-
-        :rtype: list
-        :returns: A list of :class:`requests.Response` objects.
         """
         queue_derive = True if queue_derive is None else queue_derive
         remote_dir_name = None
+        total_files = 0
         if isinstance(files, dict):
-            files = list(files.items())
+            if files.get('name'):
+                files = [files]
+                total_files = 1
+            else:
+                files = list(files.items())
         if not isinstance(files, (list, tuple)):
             files = [files]
+        if all(isinstance(f, dict) and f.get('name') for f in files):
+            total_files = len(files)
 
         responses = []
         file_index = 0
-        if checksum:
-            total_files = recursive_file_count(files, item=self, checksum=True)
-        else:
-            total_files = recursive_file_count(files, item=self, checksum=False)
+        headers = headers or {}
+        if (
+            queue_derive or not headers.get('x-archive-size-hint')
+        ) and total_files == 0:
+            total_files, total_size = recursive_file_count_and_size(
+                files, item=self, checksum=checksum
+            )
+            if not headers.get('x-archive-size-hint'):
+                headers['x-archive-size-hint'] = str(total_size)
+        file_metadata = None
         for f in files:
-            if (isinstance(f, string_types) and is_dir(f)) \
-                    or (isinstance(f, tuple) and is_dir(f[-1])):
+            if isinstance(f, dict):
+                if f.get('name'):
+                    file_metadata = f.copy()
+                    del file_metadata['name']
+                    f = f['name']
+            if (isinstance(f, str) and is_dir(f)) or (
+                isinstance(f, tuple) and is_dir(f[-1])
+            ):
                 if isinstance(f, tuple):
                     remote_dir_name = f[0].strip('/')
                     f = f[-1]
@@ -825,27 +1703,31 @@ class Item(BaseItem):
                         _queue_derive = False
                     if not f.endswith('/'):
                         if remote_dir_name:
-                            key = '{0}{1}/{2}'.format(remote_dir_name, f, key)
+                            key = f'{remote_dir_name}{f}/{key}'
                         else:
-                            key = '{0}/{1}'.format(f, key)
+                            key = f'{f}/{key}'
                     elif remote_dir_name:
-                        key = '{0}/{1}'.format(remote_dir_name, key)
+                        key = f'{remote_dir_name}/{key}'
                     key = norm_filepath(key)
-                    resp = self.upload_file(filepath,
-                                            key=key,
-                                            metadata=metadata,
-                                            headers=headers,
-                                            access_key=access_key,
-                                            secret_key=secret_key,
-                                            queue_derive=_queue_derive,
-                                            verbose=verbose,
-                                            verify=verify,
-                                            checksum=checksum,
-                                            delete=delete,
-                                            retries=retries,
-                                            retries_sleep=retries_sleep,
-                                            debug=debug,
-                                            request_kwargs=request_kwargs)
+                    resp = self.upload_file(
+                        filepath,
+                        key=key,
+                        metadata=metadata,
+                        file_metadata=file_metadata,
+                        headers=headers,
+                        access_key=access_key,
+                        secret_key=secret_key,
+                        queue_derive=_queue_derive,
+                        verbose=verbose,
+                        verify=verify,
+                        checksum=checksum,
+                        delete=delete,
+                        retries=retries,
+                        retries_sleep=retries_sleep,
+                        debug=debug,
+                        validate_identifier=validate_identifier,
+                        request_kwargs=request_kwargs,
+                    )
                     responses.append(resp)
             else:
                 file_index += 1
@@ -861,23 +1743,27 @@ class Item(BaseItem):
                     key, body = (None, f)
                 else:
                     key, body = f
-                if key and not isinstance(key, string_types):
+                if key and not isinstance(key, str):
                     key = str(key)
-                resp = self.upload_file(body,
-                                        key=key,
-                                        metadata=metadata,
-                                        headers=headers,
-                                        access_key=access_key,
-                                        secret_key=secret_key,
-                                        queue_derive=_queue_derive,
-                                        verbose=verbose,
-                                        verify=verify,
-                                        checksum=checksum,
-                                        delete=delete,
-                                        retries=retries,
-                                        retries_sleep=retries_sleep,
-                                        debug=debug,
-                                        request_kwargs=request_kwargs)
+                resp = self.upload_file(
+                    body,
+                    key=key,
+                    metadata=metadata,
+                    file_metadata=file_metadata,
+                    headers=headers,
+                    access_key=access_key,
+                    secret_key=secret_key,
+                    queue_derive=_queue_derive,
+                    verbose=verbose,
+                    verify=verify,
+                    checksum=checksum,
+                    delete=delete,
+                    retries=retries,
+                    retries_sleep=retries_sleep,
+                    debug=debug,
+                    validate_identifier=validate_identifier,
+                    request_kwargs=request_kwargs,
+                )
                 responses.append(resp)
         return responses
 
@@ -890,22 +1776,21 @@ class Collection(Item):
         if isinstance(args[0], Item):
             orig = args[0]
             args = (orig.session, orig.identifier, orig.item_metadata)
-        super(Collection, self).__init__(*args, **kwargs)
-        if self.metadata.get(u'mediatype', u'collection') != 'collection':
+        super().__init__(*args, **kwargs)
+        if self.metadata.get('mediatype', 'collection') != 'collection':
             raise ValueError('mediatype is not "collection"!')
 
-        deflt_srh = "collection:{0.identifier}".format(self)
-        self._make_search('contents',
-                          self.metadata.get(u'search_collection', deflt_srh))
-        self._make_search('subcollections',
-                          deflt_srh + " AND mediatype:collection")
+        deflt_srh = f'collection:{self.identifier}'
+        self._make_search('contents', self.metadata.get('search_collection', deflt_srh))
+        self._make_search('subcollections', f'{deflt_srh} AND mediatype:collection')
 
-    def _do_search(self, name, query):
+    def _do_search(self, name: str, query: str):
         rtn = self.searches.setdefault(
-            name, self.session.search_items(query, fields=[u'identifier']))
-        if not hasattr(self, name + "_count"):
-            setattr(self, name + "_count", self.searches[name].num_found)
+            name, self.session.search_items(query, fields=['identifier'])
+        )
+        if not hasattr(self, f'{name}_count'):
+            setattr(self, f'{name}_count', self.searches[name].num_found)
         return rtn.iter_as_items()
 
-    def _make_search(self, name, query):
+    def _make_search(self, name: str, query: str):
         setattr(self, name, lambda: self._do_search(name, query))

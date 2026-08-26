@@ -1,0 +1,43 @@
+name: test_install
+on:
+  pull_request:
+  push:
+    branches: [master]
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  install_internetarchive:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # Previously a setuptools-version matrix, which tested the old
+      # setuptools build backend. The backend is now hatchling, so the useful
+      # axis is the supported Python range instead.
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # hatch-vcs reads the version from git tags
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install .
+      # Checks the console script runs and that the version was actually
+      # derived from git rather than falling back. Two fallbacks are possible
+      # and both must fail here: hatch-vcs yields 0.1.devN when it finds no
+      # tags, and internetarchive/__version__.py yields 0.0.0.dev0 when
+      # _version.py is missing entirely.
+      - name: Verify the version resolved from git
+        run: |
+          version=$(ia --version)
+          echo "ia --version -> $version"
+          case "$version" in
+            0.1.dev*|0.0.0.dev0|'')
+              echo "Version did not resolve from git tags: '$version'" >&2
+              exit 1
+              ;;
+          esac

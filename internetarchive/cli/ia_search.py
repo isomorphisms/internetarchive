@@ -1,8 +1,10 @@
-# -*- coding: utf-8 -*-
-#
-# The internetarchive module is a Python/CLI interface to Archive.org.
-#
-# Copyright (C) 2012-2016 Internet Archive
+"""
+ia_search.py
+
+'ia' subcommand for searching items on archive.org.
+"""
+
+# Copyright (C) 2012-2026 Internet Archive
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -17,95 +19,206 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-"""Search items on Archive.org.
+from __future__ import annotations
 
-usage:
-    ia search <query>... [options]...
-    ia search --help
-
-options:
-    -h, --help
-    -p, --parameters=<key:value>...  Parameters to send with your query.
-    -H, --header=<key:value>...      Add custom headers to your search request.
-    -s, --sort=<field order>...      Sort search results by specified fields.
-                                     <order> can be either "asc" for ascending
-                                     and "desc" for descending.
-    -i, --itemlist                   Output identifiers only.
-    -f, --field=<field>...           Metadata fields to return.
-    -n, --num-found                  Print the number of results to stdout.
-    -t, --timeout=<seconds>          Set the timeout in seconds [default: 24].
-"""
-from __future__ import absolute_import, print_function, unicode_literals
+import argparse
 import sys
-try:
-    import ujson as json
-except ImportError:
-    import json
 from itertools import chain
 
-from docopt import docopt, printable_usage
-from schema import Schema, SchemaError, Use, Or, And
-import six
-from requests.exceptions import ConnectTimeout
+from requests.exceptions import ConnectTimeout, ReadTimeout
 
-from internetarchive import search_items
-from internetarchive.cli.argparser import get_args_dict
+from internetarchive.cli.cli_utils import FlattenListAction, QueryStringAction
 from internetarchive.exceptions import AuthenticationError
+from internetarchive.utils import json
 
 
-def main(argv, session=None):
-    args = docopt(__doc__, argv=argv)
+def setup(subparsers):
+    """
+    Setup args for search command.
 
-    # Validate args.
-    s = Schema({
-        six.text_type: Use(bool),
-        '<query>': Use(lambda x: ' '.join(x)),
-        '--parameters': Use(lambda x: get_args_dict(x, query_string=True)),
-        '--header': Or(None, And(Use(get_args_dict), dict),
-                       error='--header must be formatted as --header="key:value"'),
-        '--sort': list,
-        '--field': list,
-        '--timeout': Use(lambda x: float(x[0]),
-                         error='--timeout must be integer or float.')
-    })
-    try:
-        args = s.validate(args)
-    except SchemaError as exc:
-        print('{0}\n{1}'.format(str(exc), printable_usage(__doc__)), file=sys.stderr)
-        sys.exit(1)
-
-    # Support comma separated values.
-    fields = list(chain.from_iterable([x.split(',') for x in args['--field']]))
-    sorts = list(chain.from_iterable([x.split(',') for x in args['--sort']]))
-
-    r_kwargs = dict(
-        headers=args['--header'],
-        timeout=args['--timeout'],
+    Args:
+        subparsers: subparser object passed from ia.py
+    """
+    parser = subparsers.add_parser(
+        "search", aliases=["se"], help="Search items on archive.org"
     )
 
-    search = session.search_items(args['<query>'],
-                                  fields=fields,
-                                  sorts=sorts,
-                                  params=args['--parameters'],
-                                  request_kwargs=r_kwargs)
+    # Positional arguments
+    parser.add_argument("query", type=str, help="Search query or queries.")
+
+    # Optional arguments
+    parser.add_argument(
+        "-p",
+        "--parameters",
+        nargs=1,
+        action=QueryStringAction,
+        metavar="KEY:VALUE",
+        help="Parameters to send with your query. Can be specified multiple times.",
+    )
+    parser.add_argument(
+        "-H",
+        "--header",
+        nargs=1,
+        action=QueryStringAction,
+        metavar="KEY:VALUE",
+        help="Add custom headers to your search request. "
+        "Can be specified multiple times.",
+    )
+    parser.add_argument(
+        "-s",
+        "--sort",
+        action="append",
+        help=(
+            "Sort search results by specified fields. "
+            "See https://archive.org/advancedsearch.php "
+            "for full list of sort values"
+            " (e.g. --sort 'date desc', --sort 'date asc', etc.)."
+        ),
+    )
+    parser.add_argument(
+        "-i", "--itemlist", action="store_true", help="Output identifiers only."
+    )
+    parser.add_argument(
+        "-f",
+        "--field",
+        nargs=1,
+        action=FlattenListAction,
+        help="Metadata field to return. Can be specified multiple times.",
+    )
+    parser.add_argument(
+        "-n",
+        "--num-found",
+        action="store_true",
+        help="Print the number of results to stdout.",
+    )
+    parser.add_argument(
+        "-F",
+        "--fts",
+        action="store_true",
+        help="Beta support for querying the archive.org full text search API.",
+    )
+    parser.add_argument(
+        "-D", "--dsl-fts", action="store_true", help="Submit --fts query in dsl."
+    )
+    parser.add_argument(
+        "-t", "--timeout", type=float, default=300, help="Set the timeout in seconds."
+    )
+
+    parser.set_defaults(func=lambda args: main(args, parser))
+
+
+def prepare_values(value):
+    """
+    Prepare comma-separated values based on the input value.
+    """
+    if value:
+        return list(chain.from_iterable([x.split(",") for x in value]))
+    return None
+
+
+def perform_search(args, fields, sorts, r_kwargs):
+    """
+    Perform the search using the provided arguments and request kwargs.
+    """
+    return args.session.search_items(
+        args.query,  # type: ignore
+        fields=fields,
+        sorts=sorts,
+        params=args.parameters,
+        full_text_search=args.fts,
+        dsl_fts=args.dsl_fts,
+        request_kwargs=r_kwargs,
+    )
+
+
+def handle_search_results(args, search):
+    """
+    Handle search results based on command-line arguments.
+    """
+    if args.num_found:
+        print(search.num_found)
+        sys.exit(0)
+
+    for result in search:
+        if args.itemlist:
+            if args.fts or args.dsl_fts:
+                print("\n".join(result.get("fields", {}).get("identifier")))
+            else:
+                print(result.get("identifier", ""))
+        else:
+            print(json.dumps(result))
+            if result.get("error"):
+                sys.exit(1)
+
+
+def handle_value_error(exc):
+    """
+    Handle ValueError exception.
+    """
+    return f"error: {exc}"
+
+
+def handle_connect_timeout():
+    """
+    Handle ConnectTimeout exception.
+    """
+    return "error: Request timed out. Increase the --timeout and try again."
+
+
+def handle_read_timeout():
+    """
+    Handle ReadTimeout exception.
+    """
+    return "error: The server timed out and failed to return all search results, please try again"
+
+
+def handle_authentication_error(exc):
+    """
+    Handle AuthenticationError exception.
+    """
+    return f"error: {exc}"
+
+
+def main(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    """
+    Main entry point for 'ia search'.
+    """
+    args.parameters = args.parameters or {}
+    args.header = args.header or {}
 
     try:
-        if args['--num-found']:
-            print('{0}'.format(search.num_found))
-            sys.exit(0)
+        # Prepare fields and sorts.
+        fields = prepare_values(args.field)
+        sorts = prepare_values(args.sort)
 
-        for result in search:
-            if args['--itemlist']:
-                print(result.get('identifier', ''))
-            else:
-                j = json.dumps(result)
-                print(j)
-    except ValueError as e:
-        print('error: {0}'.format(e), file=sys.stderr)
-    except ConnectTimeout as exc:
-        print('error: Request timed out. Increase the --timeout and try again.',
-              file=sys.stderr)
+        # Prepare request kwargs.
+        r_kwargs = {
+            "headers": args.header,
+            "timeout": args.timeout,
+        }
+
+        # Perform search.
+        search = perform_search(args, fields, sorts, r_kwargs)
+
+        # Handle search results.
+        handle_search_results(args, search)
+
+    except ValueError as exc:
+        error_message = handle_value_error(exc)
+        print(error_message, file=sys.stderr)
         sys.exit(1)
+
+    except ConnectTimeout:
+        error_message = handle_connect_timeout()
+        print(error_message, file=sys.stderr)
+        sys.exit(1)
+
+    except ReadTimeout:
+        error_message = handle_read_timeout()
+        print(error_message, file=sys.stderr)
+        sys.exit(1)
+
     except AuthenticationError as exc:
-        print('error: {}'.format(exc), file=sys.stderr)
+        error_message = handle_authentication_error(exc)
+        print(error_message, file=sys.stderr)
         sys.exit(1)

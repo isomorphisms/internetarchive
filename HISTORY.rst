@@ -3,13 +3,801 @@
 Release History
 ---------------
 
-1.8.2 (2018-07-02)
+5.12.0 (?)
+++++++++++
+
+**Features and Improvements**
+
+- Packaging metadata moved from ``setup.cfg`` to a PEP 621 ``pyproject.toml``,
+  built with hatchling. ``setup.py``, ``setup.cfg``, and ``MANIFEST.in`` are
+  gone.
+- The package version is now derived from the git tag by hatch-vcs instead of
+  being stored in ``internetarchive/__version__.py``. Tagging ``vX.Y.Z`` is what
+  sets the version, so the tag and the released version cannot disagree, and
+  releases no longer need a version-bump PR or a follow-up ``.devN`` bump.
+  ``internetarchive.__version__`` keeps working for installed packages, reading
+  the value hatch-vcs generates at build time. In a source checkout that has
+  never been built it falls back to the installed distribution metadata, and
+  reports ``0.0.0.dev0`` if the package is not installed at all.
+- ``make release RELEASE=X.Y.Z`` replaces ``make prepare-release`` /
+  ``check-version``; it validates the branch, tree, tag, and changelog section
+  before pushing the tag.
+- The ``install_internetarchive`` CI job now tests installation across Python
+  3.10-3.14 rather than across historical setuptools versions, which no longer
+  mean anything now that hatchling is the build backend, and asserts that the
+  installed version resolved from git rather than falling back.
+- ``setuptools`` and ``types-setuptools`` dropped from the development extras;
+  nothing imports ``setuptools`` or ``pkg_resources`` at runtime.
+
+5.11.1 (2026-08-19)
++++++++++++++++++++
+
+**Bugfixes**
+
+- Task logs are now fetched from ``archive.org`` rather than
+  ``catalogd.archive.org``. Direct access to ``catalogd.archive.org`` is
+  restricted to Archive.org's VPN, so ``ia tasks --get-task-log`` and
+  ``ia tasks --follow-task-log`` (and the corresponding
+  ``ArchiveSession.get_task_log()`` / ``follow_task_log()`` methods) failed
+  with a connection timeout for everyone else. Task listing and submission
+  already used ``archive.org``; only log retrieval was hardcoded to
+  ``catalogd``.
+- ``ia reviews`` no longer prints a ``catalogd.archive.org`` task-log URL on
+  success. It now prints an ``archive.org`` URL derived from the session host.
+
+5.11.0 (2026-07-22)
++++++++++++++++++++
+
+**Breaking changes**
+
+- Dropped support for Python 3.9. Python 3.10 or newer is now required.
+
+**Features and Improvements**
+
+- Releases are now built, tested, and published to PyPI from GitHub Actions via
+  Trusted Publishing (OIDC) when a release tag is pushed. The ``ia`` pex binary
+  is built and smoke-tested in CI and attached to the GitHub release.
+- Modernized development tooling: the codebase is now formatted with
+  ``ruff format`` (enforced in CI), CI installs dependencies with uv, and tests
+  that hit archive.org are marked with a ``network`` marker so the offline
+  suite can be run with ``pytest -m "not network"``.
+
+**Documentation**
+
+- Clarified that the ``retries_sleep`` upload argument is in seconds.
+
+5.10.1 (2026-06-29)
++++++++++++++++++++
+
+**Features and Improvements**
+
+- Changed the ``ia tasks --follow-task-log`` short option from ``-F`` to ``-f``
+  (to match ``tail -f``). ``-F`` was only present in 5.10.0 and is no longer
+  accepted.
+
+5.10.0 (2026-06-29)
++++++++++++++++++++
+
+**Features and Improvements**
+
+- Added ``ia download --range`` for partial (byte-range) downloads. It requires
+  ``--stdout`` and is repeatable, taking ``[FILE:]START-END`` values: a bare
+  range binds to the named file (vary the range or the file, not both at once),
+  or ``FILE:START-END`` binds each range to its own file. Ranges may be given as
+  ``START-END``, open-ended ``START-``, suffix ``-N`` (the last ``N`` bytes), or
+  ``bytes=...``, and a single value may carry several comma-separated ranges
+  (``0-9,50-99``), fetched in order. Segments are streamed back-to-back with no separator, so e.g.
+  WARC records selected via a CDX index's compressed offset/length can be piped
+  straight to ``zcat``. Useful for partial fetches of private items (configured
+  credentials are used). ``Item.download()``, ``File.download()``, and the
+  top-level ``internetarchive.download()`` gained a ``headers`` argument, and
+  ``Item.download()`` a ``range_jobs`` argument; passing a ``Range`` header is
+  treated as an intentional partial fetch and disables resume and full-file
+  checksum validation. An unsatisfiable range (HTTP ``416``) fails fast with a
+  clear message instead of being retried; a range covering the whole file
+  returns the full contents (HTTP ``200``). If any segment fails,
+  ``ia download`` exits non-zero, so a downstream pipe consumer can tell the
+  output is incomplete.
+- Added ``ia tasks --follow-task-log <task_id>`` to follow a task log live
+  as the task runs (``tail -f`` style), stopping automatically when the task
+  finishes. Combine with ``-p lines=-N`` to seed the last ``N`` lines first
+  (Tasks API ``lines`` semantics, as with ``--get-task-log``); any other
+  ``-p`` params are forwarded to the Tasks API. A new
+  ``ArchiveSession.follow_task_log()`` method exposes the same behavior to the
+  library.
+
+**Bugfixes**
+
+- Fixed ``File.download(stdout=True)`` consulting the local filesystem: a
+  same-named local file could cause the stream to be skipped (length/date or
+  checksum match) or trigger the auto-resume code path, which seeks the output
+  and fails on a pipe. A stdout download now ignores any on-disk file.
+- Fixed a retried ``stdout`` download falling back to writing a local disk file
+  instead of the pipe (leaving the pipe empty). A ``stdout`` download now always
+  writes to ``stdout``, even across retries.
+- Fixed auto-resume corrupting a file when a resumed transfer was itself retried:
+  the internal ``Range`` header was not recomputed for the retry, so it no longer
+  matched the (grown) local file and the seek offset, re-fetching already-written
+  bytes. The resume ``Range`` is now recomputed from the current file size on
+  every attempt.
+- Fixed ``ia tasks --parameter`` crashing when combined with
+  ``--get-task-log``. Parameters such as ``lines`` are now merged into the
+  task log request's query string, allowing ``ia tasks -G <task_id> -p
+  lines=100`` to fetch a truncated log. ``get_task_log()`` gained a ``params``
+  argument; ``params`` and ``request_kwargs`` are now keyword-only and kept
+  distinct, so request kwargs (e.g. ``timeout``, ``headers``) are no longer
+  serialized into the URL as query parameters
+  (`#764 <https://github.com/jjjake/internetarchive/pull/764>`_).
+
+5.9.0 (2026-05-28)
 ++++++++++++++++++
+
+**Features and Improvements**
+
+- **Behavior change:** ``ia download``, ``Item.download()``,
+  ``File.download()``, and the top-level ``internetarchive.download()``
+  now send ``cnt=0`` by default, so downloads no longer count toward
+  archive.org view counts. Pass ``--count-views`` (CLI) or
+  ``count_views=True`` (library) to opt back in; the parameter is
+  omitted from the request entirely in that case.
+- ``ia download``, ``ia delete``, and ``ia list`` now accept ``--glob``
+  and ``--exclude`` flags multiple times in addition to the existing
+  pipe-separated form. ``--glob "*.mp4" --glob "*.xml"`` is now
+  equivalent to ``--glob "*.mp4|*.xml"``, and the two forms can be
+  mixed. ``Item.get_files()`` also pipe-splits list-element patterns
+  for ``glob_pattern`` and ``exclude_pattern``, so callers can pass
+  mixed forms like ``glob_pattern=['*.mp4|*.xml', '*.jpg']``
+  (`#769 <https://github.com/jjjake/internetarchive/pull/769>`_).
+
+**Bugfixes**
+
+- Fixed ``write_review`` sending POST data as form-encoded instead of JSON.
+  Now sends the request body as a JSON-encoded dict with ``Content-Type:
+  application/json`` via the requests ``json`` parameter
+  (`#753 <https://github.com/jjjake/internetarchive/pull/753>`_).
+- Restored ``append_list`` deduplication that was lost in a prior refactor,
+  preventing duplicate values from being appended to multi-value metadata
+  fields (`#767 <https://github.com/jjjake/internetarchive/pull/767>`_).
+- Fixed ``ia metadata --remove`` failing to match semicolon-delimited
+  subjects with leading whitespace (e.g. ``"foo; bar; baz"`` split into
+  ``[" bar", " baz"]``). Values are now stripped after splitting
+  (`#768 <https://github.com/jjjake/internetarchive/pull/768>`_).
+
+**Documentation**
+
+- Corrected default ``ia.ini`` config path in docs, thanks to
+  `@bkjoh <https://github.com/bkjoh>`_
+  (`#766 <https://github.com/jjjake/internetarchive/pull/766>`_).
+- Fixed Installation page rendering bugs
+  (`#770 <https://github.com/jjjake/internetarchive/pull/770>`_).
+- Fixed Sphinx render warnings in the ``get_config`` docstring.
+- Linked the CLI Quick Start and Upload warning to the canonical
+  Collections docs
+  (`#772 <https://github.com/jjjake/internetarchive/pull/772>`_).
+
+5.8.0 (2026-02-18)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Rewrote ``PostDataAction`` in CLI to accept both JSON strings and ``key:value`` format.
+  Previously only JSON was accepted; now ``key:value`` pairs are also supported.
+- Added "can be specified multiple times" hints to repeatable CLI flags.
+- Standardized CLI help text capitalization across all subcommands.
+
+**Bugfixes**
+
+- Fixed CLI argument parsing bug where ``nargs="+"`` on options like ``--header``,
+  ``--metadata``, and ``--format`` would greedily consume subsequent positional
+  arguments (e.g. the identifier). Changed to ``nargs=1`` with repeated flags.
+- Fixed mutable ``default={}`` bug in custom argparse actions (``PostDataAction``,
+  ``QueryStringAction``, ``MetadataAction``, ``FlattenListAction``) that caused state
+  leakage when parsers were reused across multiple invocations.
+- Fixed ``RecursionError`` caused by ``socket.connect`` being monkey-patched on every
+  ``ArchiveSession`` instantiation. Each new session would wrap the already-patched
+  function, causing infinite mutual recursion after ~980 sessions. The patch is now
+  applied once at module import time
+  (`#746 <https://github.com/jjjake/internetarchive/issues/746>`_).
+
+5.7.2 (2026-01-29)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Added support for appending a custom suffix to the User-Agent string.
+  The default User-Agent (including access key) is always sent to ensure
+  proper request tracking.
+
+  Example: With ``user_agent_suffix = MyApp/1.0``, the full User-Agent becomes:
+  ``internetarchive/5.7.2 (Darwin x86_64; N; en; ACCESS_KEY) Python/3.9.0 MyApp/1.0``
+
+  - CLI: ``ia --user-agent-suffix "MyApp/1.0" <command>``
+  - Config file: ``user_agent_suffix = MyApp/1.0`` in ``[general]`` section
+  - Python API: ``get_session(config={'general': {'user_agent_suffix': 'MyApp/1.0'}})``
+
+**Bugfixes**
+
+- Fixed bug where metadata append was not working correctly when source metadata field was a list, and failing with obscure messages in some cases.
+- Fixed inverted logic for ``--download-history`` flag in ``ia download`` where passing the flag would ignore history files instead of downloading them (`#735 <https://github.com/jjjake/internetarchive/issues/735>`_).
+
+5.7.1 (2025-10-29)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Explicitly set Content-Type header in account API requests.
+  This header wasn't being set in some cases and caused some requests to fail.
+
+5.7.0 (2025-10-16)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Fixed critical bug in ``ia delete --glob`` where all files were being deleted regardless
+  of the glob pattern. This bug was introduced in version v5.4.1 (2025-07-16).
+- More metadata insert bugfixes and refactoring.
+
+5.6.1 (2025-10-14)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Fixed bug where metadata insert was clobbering and indexed modify writes were inserting.
+
+5.6.0 (2025-10-10)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Fixed bug in ``ia download`` where identifier was needlessly being validated and blocking some items from being downloaded.
+- Fixed regression in ``ia download --stdout`` where directories were being created.
+
+**Features and Improvements**
+
+- Added support for the Retry-After HTTP header to improve handling of rate-limited API responses.
+- Added support for configuring IA-S3 keys via IA_ACCESS_KEY_ID and IA_SECRET_ACCESS_KEY environment variables.
+- Added ``headers`` parameter to ``internetarchive.files.File.download()`` for adding custom headers to download requests.
+- Improved Windows filename sanitization.
+
+5.5.1 (2025-09-05)
+++++++++++++++++++
+
+**Security**
+
+- **Fixed a critical directory traversal vulnerability in** File.download(). All users are urged to upgrade immediately. This prevents malicious filenames from writing files outside the target directory, a risk especially critical for Windows users.
+- Added automatic filename sanitization with platform-specific rules.
+- Added path resolution checks to block directory traversal attacks.
+- Introduced warnings when filenames are sanitized to maintain user awareness.
+
+**Bugfixes**
+
+- Fixed bug in JSON parsing for ia upload --file-metadata ....
+
+5.5.0 (2025-07-17)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Added --parameters option to ``ia metadata``.
+
+5.4.1 (2025-07-16)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Stop setting scanner on upload per policy change.
+
+**Bugfixes**
+
+- Fixed bug where REMOVE_TAG was not working with indexed keys.
+- Fixed argument validation and option parsing in ``ia download``.
+
+5.4.0 (2025-04-29)
+++++++++++++++++++
+
+**Features and Improvements**
+- Added ``--print-auth-header`` option to ``ia configure``.
+
+**Bugfixes**
+- Corrected behavior of ``ia_copy`` to avoid dropping path prefixes, fixing ``ia_move`` to properly delete moved files in subdirectories (via `PR #693 <https://github.com/jjjake/internetarchive/pull/693>`_).
+- Fixed bug where hardcoded test comment was being sent with every request.
+- Fixed issue where ``ia reviews --index/--noindex`` only worked for configured user.
+
+5.3.1 (2025-03-26)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Fixed bug where ``ia reviews --index/--noindex`` was only working for the configured user.
+
+5.3.0 (2025-03-26)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Added ``ia configure --show`` to print config to stdout.
+- Added ``ia configure --check`` for validating credentials.
+- Added ``ia configure --whoami`` for retrieving info about the configured user.
+- Added ``ia simplelists`` command for managing simplelists.
+- Added ``ia flag`` command for managing flags.
+
+**Bugfixes**
+
+- Fixed bugs in ``ia copy`` and ``ia move`` where an ``AttributeError`` was being raised.
+- Exit with 0 rather than 1 with ``ia upload --checksum`` if the file already exists.
+
+5.2.1 (2025-02-12)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Fixed TypeError bug in ``ia delete`` that was causing all `ia delete` commands to fail.
+- Fixed bug in ``ia metadata`` where IDs were being validated needlessly and making it impossible to modify some items.
+- Fixed bug where bulk download was failing with TypeError.
+
+5.2.0 (2025-01-10)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Fixed bug where failed requests to IA-S3 check_limit API would be treated as a 503 slowdown error.
+
+5.1.0 (2025-01-07)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- added ``--reduced-priority`` option to ``ia metadata``.
+
+**Bugfixes**
+
+- Fixed bugs for URL parameter options in CLI.
+- Fixed various bugs and simplified CLI options with KEY:VALUE values.
+- Fixed bug in ``ia --host <cmd>`` where the host was not being set correctly.
+- Removed identifier validation from ``ia reviews``.
+
+5.0.4 (2024-12-10)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Fixed bug where ``ia delete --no-backup`` was not turning off backups.
+- Fixed bug where ``ia delete`` required you specify a file.
+- Fixed bug where ``ia delete`` did not work correctly with multiple ``--format`` args.
+
+5.0.4 (2024-11-15)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Fixed bug where some error messages mentioned the wrong arg in the message.
+- Fixed bug where Scrape API was being used for num-found,
+  even if Advanced Search was triggered via page/rows params.
+
+5.0.3 (2024-11-12)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Fixed bug in CLI where some multi-arguments were being treated as single arguments.
+- Fixed bug where InvalidHeader was being raised when a custom scanner was provided in some cases.
+
+5.0.2 (2024-11-11)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Fixed bug where ``ia metadata --spreadsheet`` would fail and return
+  ``ia metadata: error: the following arguments are required: identifier``.
+
+5.0.1 (2024-11-08)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Fix bug where the use of signal.SIGPIPE causes the CLI to crash on Windows (SIGPIPE is not available on Windows).
+
+5.0.0 (2024-11-07)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Updated the CLI's command-line argument parsing by replacing the obsolete ``docopt``
+  with the native ``argparse`` library, ensuring continued functionality
+  and future compatibility.
+  ***Note: While the CLI functionality hasn't changed, some commands may need to be formatted slightly differently. If you encounter any issues, refer to ``ia --help`` and ``ia {command} --help`` if you run into any issues.***
+
+4.1.0 (2024-05-07)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Use mtime from files.xml if no Last-Modified header is available (e.g. VTT files).
+
+4.0.1 (2024-04-15)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Partially downloaded files will now automatically resume where they left off when retried.
+- Use ``Last-Modified`` header to set all mtimes (this includes files.xml now).
+
+3.7.0 (2024-03-19)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Added support for JSON Patch test operations, via the ``expect`` parameter.
+- Added support for moving values via --append-list
+  (Now, rather than ignoring any requests where the value is already present,
+  --append-list will move the value to the end of the list).
+- Switched to importlib-metadata to drop deprecated pkg_resources.
+
+**Bugfixes**
+
+- Fixed automatic size hint on uploads.
+- Fixed bug where auth wasn't being sent for searches with user_aggs params.
+
+3.6.0 (2023-12-27)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Added ``set_scanner`` and ``--no-scanner`` options to upload to stop ia's default behavior
+  of setting the scanner field in meta.xml on initial upload.
+- ``0`` is now returned instead of an exception when search fails to retrieve the total number
+  of hits for a query.
+
+3.5.0 (2023-05-09)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Fixed bug in ``ia metadata --insert`` where duplicate values were being added in
+  some cases
+
+**Features and Improvements**
+
+- Added timeout option for metadata writes. Set default to 60 seconds.
+
+3.4.0 (2023-04-05)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Added parameters for filtering files based on their source value in files.xml.
+- Added support for downloading multiple files to stdout.
+- Added timeout parameter to download.
+
+3.3.0 (2023-01-06)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Added support for inserting metadata into an existing multi-value metadata
+  field. It differs from ``ia metadata <id> --modify collection[0]:foo`` in
+  that it does not clobber. For example,
+  ``ia metadata <id> --insert collection[0]:foo`` will insert ``foo`` as the
+  first collection, it will not clobber.
+
+**Bugfixes**
+
+- Fixed bug in search where timeouts would always be returned on queries
+  submitted to the files index where more than 10,000 results would be
+  returned.
+
+3.2.0 (2023-01-06)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Added support for admins to delete reviews via itemname.
+
+3.1.0 (2023-01-06)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Fixed bug in ``ia search --fts`` where ``--itemlist`` was printing empyt lines.
+- Fixed bug in ``ia search --fts`` where ``-p scope:all`` was not working.
+- Fixed directory creation race conditions in download.
+- Fixed bug in ``ia download --stdout`` where nothing would be printed to stdout
+  if the specified file existed on disk.
+- Fixed bug where that made it impossible to upload to user items.
+- Fixed memoryview error when running ``Item.upload`` with ``StringIO`` input
+  and ``verbose=True``.
+- Fixed bug in upload where a period was not being expanded properly to the
+  contents of the current directory.
+
+**Features and Improvements**
+
+- Added support for admins to delete other users reviews
+- Added support for excluding files in ``ia download`` via the ``--exclude`` parameter.
+- Various refactoring and code simplifications.
+
+3.0.2 (2022-06-15)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Fixed bug where installation would fail in some cases if ``requests``, ``tqdm``,
+  or ``jsonpatch`` were not already installed.
+
+3.0.1 (2022-06-02)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Cut down on the number of HTTP requests made by search.
+- Added Python type hints, and other Python 3 improvements.
+
+3.0.0 (2022-03-17)
+++++++++++++++++++
+
+**Breaking changes**
+
+- Removed Python 2.7, 3.5, and 3.6 support
+- ``ia download`` no longer has a ``--verbose`` option, and ``--silent`` has been renamed to ``--quiet``.
+- ``internetarchive.download``, ``Item.download`` and ``File.download`` no longer have a ``silent``
+  keyword argument. They are silent by default now unless ``verbose`` is set to ``True``.
+
+**Features and Improvements**
+
+- ``page`` parameter is no longer required if ``rows`` parameter is specified in search requests.
+- advancedsearch.php endpoint now supports IAS3 authorization.
+- ``ia upload`` now has a ``--keep-directories`` option to use the full local file paths as the
+  remote name.
+- Added progress bars to ``ia download``
+
+**Bugfixes**
+
+- Fixed treatment of list-like file metadata in ``ia list`` under Python 3
+- Fixed ``ia upload --debug`` only displaying the first request.
+- Fixed uploading from stdin crashing with UnicodeDecodeError or TypeError exception.
+- Fixed ``ia upload`` silently ignoring exceptions.
+- Fixed uploading from a spreadsheet with a BOM (UTF-8 byte-order mark) raising a KeyError.
+- Fixed uploading from a spreadsheet not reusing the ``identifier`` column.
+- Fixed uploading from a spreadsheet not correctly dropping the ``item`` column from metadata.
+- Fixed uploading from a spreadsheet with ``--checksum`` crashing on skipped files.
+- Fixed minor bug in S3 overload check on upload error retries.
+- Fixed various messages being printed to stdout instead of stderr.
+- Fixed format selection for on-the-fly files.
+
+2.3.0 (2022-01-20)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Added support for ``IA_CONFIG_FILE`` environment variable to specify the configuration file path.
+- Added ``--no-derive`` option to ``ia copy`` and ``ia move``.
+- Added ``--no-backup`` option to ``ia copy``, ``ia move``, ``ia upload``, and ``ia delete``.
+
+**Bugfixes**
+
+- Fixed bug where queries to the Scrape API (e.g. most search requests made by ``internetarchive``)
+  would fail to return all docs without any error reporting, if the Scrape API times out.
+  All queries to the Scrape API are now tested to assert the number of docs returned matches the
+  hit count returned by the Scrape API.
+  If these numbers don't match, an exception is thrown in the Python API and the CLI exits with
+  a non-zero exit code and error message.
+- Use .archive.org as the default cookie domain. This fixes a bug where an AttributeError exception
+  would be raised if a cookie wasn't set in a config file.
+
+2.2.0 (2021-11-23)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Added ``ia reviews <id> --delete``.
+- Added ability to fetch a users reviews from an item via ``ia reviews <id>``.
+
+**Bugfixes**
+
+- Fixed bug in ``ArchiveSession`` object where domains weren't getting set properly for cookies.
+  This caused archive.org cookies to be sent to other domains.
+- Fixed bug in URL param parser for CLI.
+- Fixed Python 2 bug in ``ia upload --spreadsheet``.
+
+2.1.0 (2021-08-25)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Better error messages in ``ia upload --spreadsheet``.
+- Added support for REMOTE_NAME in ``ia upload --spreadsheet`` via a ``REMOTE_NAME`` column.
+- Implemented XDG Base Directory specification.
+
+**Bugfixes**
+
+- Fixed bug in FTS where searches would crash with a TypeError exception.
+- Improved Python 2 compatibility.
+
+2.0.3 (2021-05-03)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Fixed bug where some "falsey"/empty values were being dropped when modifying metadata.
+
+2.0.2 (2021-04-06)
+++++++++++++++++++
+
+- Fixing pypi issues...
+
+2.0.1 (2021-04-06)
+++++++++++++++++++
+
+**Bugfixes**
+
+- Exit with 0 in ``ia tasks --cmd ...`` if a task is already queued or running.
+
+2.0.0 (2021-04-05)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Automatic paging scrolling added to ``ia search --fts``.
+- Default support for lucene queries in ``ia search --fts``.
+- Added support for getting rate-limit information from the Tasks API (i.e. ``ia tasks --get-rate-limit --cmd derive.php``).
+- Added ability to set a remote-filename in a spreadsheet when uploading via ``ia upload --spreadsheet ...``.
+
+**Bugfixes**
+
+- Fixed bug in ``ia metadata --remove ...`` where multiple collections would be removed
+  if the specified collection was a substring of any of the existing collections.
+- Fixed bug in ``ia metadata --remove ...`` where removing multiple collections was sometimes
+  not supported.
+
+1.9.9 (2021-01-27)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Added support for FTS API.
+- Validate identifiers in spreadsheet before uploading file with ``ia upload --spreadsheet``.
+- Added ``ia configure --print-cookies``.
+  This is helpful for using your archive.org cookies in other programs like ``curl``.
+  e.g. ``curl -b $(ia configure --print-cookies) <url> ...``
+
+1.9.6 (2020-11-10)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Added ability to submit tasks with a reduced priority.
+- Added ability to add headers to modify_metadata requests.
+
+**Bugfixes**
+
+- Bumped version requirements for ``six``.
+  This addresses the "No module named collections_abc" error.
+
+1.9.5 (2020-09-18)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Increased chunk size in download and added other download optimizations.
+- Added support for submitting reviews via ``Item.review()`` and ``ia review``.
+- Improved exception/error messages in cases where s3.us.archive.org returns invalid XML during uploads.
+- Minor updates and improvements to continuous integration.
+
+1.9.4 (2020-06-24)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Added support for adding file-level metadata at time of upload.
+- Added ``--no-backup`` to ``ia upload`` to turn off backups.
+
+**Bugfixes**
+
+- Fixed bug in ``internetarchive.get_tasks`` where no tasks were returned unless ``catalog`` or ``history`` params were provided.
+- Fixed bug in upload where headers were being reused in certain cases.
+  This lead to issues such as queue-derive being turned off in some cases.
+- Fix crash in ``ia tasks`` when a task log contains invalid UTF-8 character.
+- Fixed bug in upload where requests were not being closed.
+
+1.9.3 (2020-04-07)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Added support for removing items from simplelists as if they were collections.
+- Added ``Item.derive()`` method for deriving items.
+- Added ``Item.fixer()`` method for submitting fixer tasks.
+- Added ``--task-args`` to ``ia tasks`` for submitting task args to the Tasks API.
+
+**Bugfixes**
+
+- Minor bug fix in ``ia tasks`` to fix support for tasks that do not require a ``--comment`` option.
+
+1.9.2 (2020-03-15)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Switched to ``tqdm`` for progress bar (``clint`` is no longer maintained).
+- Added ``Item.identifier_available()`` method for calling check_identifier.php.
+- Added support for opening details page in default browser after upload.
+- Added support for using ``item`` or ``identifier`` as column header in spreadsheet mode.
+- Added ``ArchiveSession.get_my_catalog()`` method for retrieving running/queued tasks.
+- Removed backports.csv requirement for newer Python releases.
+- Authorization header is now used for metadata reads, to support privileged access to /metadata.
+- ``ia download`` no longer downloads history dir by default.
+- Added ``ignore_history_dir`` to ``Item.download()``. The default is False.
+
+**Bugfixes**
+
+- Fixed bug in ``ia copy`` and ``ia move`` where filenames weren't being encoded/quoted correctly.
+- Fixed bug in ``Item.get_all_item_tasks()`` where all calls would fail unless a dict was provided to ``params``.
+- Read from ~/.config/ia.ini with fallback to ~/.ia regardless of the existence of ~/.config
+- Fixed S3 overload message always mentioning the total maximum number of retries, not the remaining ones.
+- Fixed bug where a KeyError exception would be raised on most calls to dark items.
+- Fixed bug where md5 was being calculated for every upload.
+
+1.9.0 (2019-12-05)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Implemented new archive.org `Tasks API <https://archive.org/services/docs/api/tasks.html>`_.
+- Added support for darking and undarking items via the Tasks API.
+- Added support for submitting arbitrary tasks
+  (only darking/undarking currently supported, see Tasks API documentation).
+
+**Bugfixes**
+
+- ``ia download`` now displays ``download failed`` instead of ``success`` when download fails.
+- Fixed bug where ``Item.get_file`` would not work on unicode names in Python 2.
+
+1.8.5 (2019-06-07)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Improved timeout logging and exceptions.
+- Added support for arbitrary targets to metadata write.
+- IA-S3 keys now supported for auth in download.
+- Authoraization (i.e. ``ia configure``) now uses the archive.org xauthn endpoint.
+
+**Bugfixes**
+
+- Fixed encoding error in --get-task-log
+- Fixed bug in upload where connections were not being closed in upload.
+
+1.8.4 (2019-04-11)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- It's now possible to retrieve task logs, given a task id, without first retrieving the items task history.
+- Added examples to ``ia tasks`` help.
+
+1.8.3 (2019-03-29)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Increased search timeout from 24 to 300 seconds.
+
+**Bugfixes**
+
+- Fixed bug in setup.py where backports.csv wasn't being installed when installing from pypi.
+
+1.8.2 (2019-03-21)
+++++++++++++++++++
+
+**Features and Improvements**
+
+- Documentation updates.
+- Added support for write-many to modify_metadata.
 
 **Bugfixes**
 
 - Fixed bug in ``ia tasks --task-id`` where no task was being returned.
 - Fixed bug in ``internetarchive.get_tasks()`` where it was not possible to query by ``task_id``.
+- Fixed TypeError bug in upload when uploading with checksum=True.
 
 1.8.1 (2018-06-28)
 ++++++++++++++++++
@@ -161,7 +949,7 @@ Release History
 - Added unicode support to ``ia upload --spreadsheet`` and ``ia metadata --spreadsheet`` using the ``backports.csv`` module.
 - Fixed bug in ``ia upload --spreadsheet`` where some metadata was accidentally being copied from previous rows
   (e.g. when multiple subjects were used).
-- Submitter wasn't being added to ``ia tasks --json`` ouptut, it now is.
+- Submitter wasn't being added to ``ia tasks --json`` output, it now is.
 - ``row_type`` in ``ia tasks --json`` was returning integer for row-type rather than name (e.g. 'red').
 
 1.5.0 (2017-02-17)
@@ -193,12 +981,12 @@ Release History
 **Features and Improvements**
 
 - Added ``ia copy`` and ``ia move`` for copying and moving files in archive.org items.
-- Added support for outputing JSON in ``ia tasks``.
+- Added support for outputting JSON in ``ia tasks``.
 - Added support to ``ia download`` to write to stdout instead of file.
 
 **Bugfixes**
 
-- Fixed bug in upload where AttributeError was rasied when trying to upload file-like objects without a name attribute.
+- Fixed bug in upload where AttributeError was raised when trying to upload file-like objects without a name attribute.
 - Removed identifier validation from ``ia delete``.
   If an identifier already exists, we don't need to validate it.
   This only makes things annoying if an identifier exists but fails ``internetarchive`` id validation.
@@ -206,7 +994,7 @@ Release History
   Ideally IA-S3 would always return XML, but that's not the case as of now.
   Try to dump the HTML in the S3 response if unable to parse XML.
 - Fixed bug where ArchiveSession headers weren't being sent in prepared requests.
-- Fixed bug in ``ia upload --size-hint`` where value was an integer, but requests requries it to be a string.
+- Fixed bug in ``ia upload --size-hint`` where value was an integer, but requests requires it to be a string.
 - Added support for downloading files to stdout in ``ia download`` and ``File.download``.
 
 1.1.0 (2016-11-18)
@@ -220,14 +1008,14 @@ Release History
 **Bugfixes**
 
 - Fixed bug where the full filepath was being set as the remote filename in Windows.
-- Convert all metadata header values to strings for compatability with ``requests>=2.11.0``.
+- Convert all metadata header values to strings for compatibility with ``requests>=2.11.0``.
 
 1.0.10 (2016-09-20)
 +++++++++++++++++++
 
 **Bugfixes**
 
-- Convert x-archive-cascade-delete headers to strings for compatability with ``requests>=2.11.0``.
+- Convert x-archive-cascade-delete headers to strings for compatibility with ``requests>=2.11.0``.
 
 1.0.9 (2016-08-16)
 ++++++++++++++++++
@@ -253,7 +1041,7 @@ Release History
 
 **Features and Improvements**
 
-- Added ``internetarchive.api.get_user_info()``. 
+- Added ``internetarchive.api.get_user_info()``.
 
 1.0.6 (2016-07-14)
 ++++++++++++++++++
@@ -294,11 +1082,11 @@ Release History
 
 - Use scrape API for getting total number of results rather than the advanced search API.
 - Improved error messages for IA-S3 (upload) related errors.
-- Added retry suport to delete.
+- Added retry support to delete.
 - ``ia delete`` no longer exits if a single request fails when deleting multiple files, but continues onto the next file.
   If any file fails, the command will exit with a non-zero status code.
 - All search requests now require authentication via IA-S3 keys.
-  You can run ``ia configure`` to generate a config file that will be used to authenticate all search requests automatically. 
+  You can run ``ia configure`` to generate a config file that will be used to authenticate all search requests automatically.
   For more details refer to the following links:
 
   http://internetarchive.readthedocs.io/en/latest/quickstart.html?highlight=configure#configuring
@@ -339,8 +1127,8 @@ Release History
 
 **Bugfixes**
 
-- Fixed memory leak in `ia upload --spreadsheet=metadata.csv`.
-- Fixed arg parsing bug in `ia` CLI.
+- Fixed memory leak in ``ia upload --spreadsheet=metadata.csv``.
+- Fixed arg parsing bug in ``ia`` CLI.
 
 1.0.0 (2016-03-01)
 ++++++++++++++++++
@@ -349,7 +1137,7 @@ Release History
 
 - Renamed ``internetarchive.iacli`` to ``internetarchive.cli``.
 - Moved ``File`` object to ``internetarchive.files``.
-- Converted config fromat from YAML to INI to avoid PyYAML requirement.
+- Converted config format from YAML to INI to avoid PyYAML requirement.
 - Use HTTPS by default for Python versions > 2.7.9.
 - Added ``get_username`` function to API.
 - Improved Python 3 support. ``internetarchive`` is now being tested against Python versions 2.6, 2.7, 3.4, and 3.5.
@@ -369,26 +1157,26 @@ Release History
 
 **Bugfixes**
 
-- Fixed `ia help` bug.
-- Fixed bug in `File.download()` where connection errors weren't being caught/retried correctly.
+- Fixed ``ia help`` bug.
+- Fixed bug in ``File.download()`` where connection errors weren't being caught/retried correctly.
 
 0.9.7 (2015-11-05)
 ++++++++++++++++++
 
 **Bugfixes**
 
-- Cleanup partially downloaded files when `download()` fails.
+- Cleanup partially downloaded files when ``download()`` fails.
 
 **Features and Improvements**
 
-- Added `--format` option to `ia delete`.
-- Refactored `download()` and `ia download` to behave more like rsync. Files are now clobbered by default,
-  `ignore_existing` and `--ignore-existing` now skip over files already downloaded without making a request.
-- Added retry support to `download()` and `ia download`.
-- Added `files` kwarg to `Item.download()` for downloading specific files.
-- Added `ignore_errors` option to `File.download()` for ignoring (but logging) exceptions.
+- Added ``--format`` option to ``ia delete``.
+- Refactored ``download()`` and ``ia download`` to behave more like rsync. Files are now clobbered by default,
+  ``ignore_existing`` and ``--ignore-existing`` now skip over files already downloaded without making a request.
+- Added retry support to ``download()`` and ``ia download``.
+- Added ``files`` kwarg to ``Item.download()`` for downloading specific files.
+- Added ``ignore_errors`` option to ``File.download()`` for ignoring (but logging) exceptions.
 - Added default timeouts to metadata and download requests.
-- Less verbose output in `ia download` by default, use `ia download --verbose` for old style output.
+- Less verbose output in ``ia download`` by default, use ``ia download --verbose`` for old style output.
 
 0.9.6 (2015-10-12)
 ++++++++++++++++++
@@ -402,14 +1190,14 @@ Release History
 
 **Features and Improvements**
 
-- Added skip based on mtime and length if no other clobber/skip options specified in `download()` and `ia download`.
+- Added skip based on mtime and length if no other clobber/skip options specified in ``download()`` and ``ia download``.
 
 0.9.4 (2015-10-01)
 ++++++++++++++++++
 
 **Features and Improvements**
 
-- Added `internetarchive.api.get_username()` for retrieving a username with an S3 key-pair.
+- Added ``internetarchive.api.get_username()`` for retrieving a username with an S3 key-pair.
 - Added ability to sync downloads via an sqlite database.
 
 0.9.3 (2015-09-28)
@@ -417,12 +1205,12 @@ Release History
 
 **Features and Improvements**
 
-- Added ability to download items from an itemlist or search query in `ia download`.
-- Made `ia configure` Python 3 compatabile.
+- Added ability to download items from an itemlist or search query in ``ia download``.
+- Made ``ia configure`` Python 3 compatible.
 
 **Bugfixes**
 
-- Fixed bug in `ia upload` where uploading an item with more than one collection specified caused the collection check to fail.
+- Fixed bug in ``ia upload`` where uploading an item with more than one collection specified caused the collection check to fail.
 
 
 0.9.2 (2015-08-17)
@@ -430,7 +1218,7 @@ Release History
 
 **Bugfixes**
 
-- Added error message for failed `ia configure` calls due to invalid creds. 
+- Added error message for failed ``ia configure`` calls due to invalid creds.
 
 
 0.9.1 (2015-08-13)
@@ -439,7 +1227,7 @@ Release History
 **Bugfixes**
 
 - Updated docopt to v0.6.2 and PyYAML to v3.11.
-- Updated setup.py to automatically pull version from `__init__`.
+- Updated setup.py to automatically pull version from ``__init__``.
 
 
 0.8.5 (2015-07-13)
@@ -447,7 +1235,7 @@ Release History
 
 **Bugfixes**
 
-- Fixed UnicodeEncodeError in `ia metadata --append`.
+- Fixed UnicodeEncodeError in ``ia metadata --append``.
 
 **Features and Improvements**
 
@@ -459,7 +1247,7 @@ Release History
 
 **Features and Improvements**
 
-- Added check to `ia upload` to see if the collection being uploaded to exists.
+- Added check to ``ia upload`` to see if the collection being uploaded to exists.
   Also added an option to override this check.
 
 0.8.3 (2015-05-18)
@@ -482,31 +1270,31 @@ Release History
 
 **Bugfixes**
 
-- Fixed bug in `internetarchive.config.get_auth_config` (i.e. `ia configure`)
+- Fixed bug in ``internetarchive.config.get_auth_config`` (i.e. ``ia configure``)
   where logged-in cookies returned expired within hours. Cookies should now be
   valid for about one year.
 
 0.7.8 (2014-12-23)
 ++++++++++++++++++
 
-- Output error message when downloading non-existing files in `ia download` rather
+- Output error message when downloading non-existing files in ``ia download`` rather
   than raising Python exception.
-- Fixed IOError in `ia search` when using `head`, `tail`, etc..
-- Simplified `ia search` to output only JSON, rather than doing any special
+- Fixed IOError in ``ia search`` when using ``head``, ``tail``, etc..
+- Simplified ``ia search`` to output only JSON, rather than doing any special
   formatting.
-- Added experimental support for creating pex binaries of ia in `Makefile`. 
+- Added experimental support for creating pex binaries of ia in ``Makefile``.
 
 0.7.7 (2014-12-17)
 ++++++++++++++++++
 
-- Simplified `ia configure`. It now only asks for Archive.org email/password and
+- Simplified ``ia configure``. It now only asks for Archive.org email/password and
   automatically adds S3 keys and Archive.org cookies to config.
-  See `internetarchive.config.get_auth_config()`.
+  See ``internetarchive.config.get_auth_config()``.
 
 0.7.6 (2014-12-17)
 ++++++++++++++++++
 
-- Write metadata to stdout rather than stderr in `ia mine`.
+- Write metadata to stdout rather than stderr in ``ia mine``.
 - Added options to search archive.org/v2.
 - Added destdir option to download files/itemdirs to a given destination dir.
 
@@ -518,39 +1306,39 @@ Release History
 0.7.4 (2014-10-08)
 ++++++++++++++++++
 
-- Fixed missing "import" typo in `internetarchive.iacli.ia_upload`.
+- Fixed missing "import" typo in ``internetarchive.iacli.ia_upload``.
 
 0.7.3 (2014-10-08)
 ++++++++++++++++++
 
-- Added progress bar to `ia mine`.
-- Fixed unicode metadata support for `upload()`.
+- Added progress bar to ``ia mine``.
+- Fixed unicode metadata support for ``upload()``.
 
 0.7.2 (2014-09-16)
 ++++++++++++++++++
 
-- Suppress `KeyboardInterrupt` exceptions and exit with status code 130.
-- Added ability to skip downloading files based on checksum in `ia download`,
-  `Item.download()`, and `File.download()`.
-- `ia download` is now verbose by default. Output can be suppressed with the `--quiet`
+- Suppress ``KeyboardInterrupt`` exceptions and exit with status code 130.
+- Added ability to skip downloading files based on checksum in ``ia download``,
+  ``Item.download()``, and ``File.download()``.
+- ``ia download`` is now verbose by default. Output can be suppressed with the ``--quiet``
   flag.
 - Added an option to not download into item directories, but rather the current working
-  directory (i.e. `ia download --no-directories <id>`).
+  directory (i.e. ``ia download --no-directories <id>``).
 - Added/fixed support for modifying different metadata targets (i.e. files/logo.jpg).
 
 0.7.1 (2014-08-25)
 ++++++++++++++++++
 
-- Added `Item.s3_is_overloaded()` method for S3 status check. This method is now used on
+- Added ``Item.s3_is_overloaded()`` method for S3 status check. This method is now used on
   retries in the upload method now as well. This will avoid uploading any data if a 503
   is expected. If a 503 is still returned, retries are attempted.
-- Added `--status-check` option to `ia upload` for S3 status check.
-- Added `--source` parameter to `ia list` for returning files matching IA source (i.e. 
+- Added ``--status-check`` option to ``ia upload`` for S3 status check.
+- Added ``--source`` parameter to ``ia list`` for returning files matching IA source (i.e.
   original, derivative, metadata, etc.).
-- Added support to `ia upload` for setting remote-name if only a single file is being
+- Added support to ``ia upload`` for setting remote-name if only a single file is being
   uploaded.
 - Derive tasks are now only queued after the last file has been uploaded.
-- File URLs are now quoted in `File` objects, for downloading files with specail
+- File URLs are now quoted in ``File`` objects, for downloading files with special
   characters in their filenames
 
 0.7.0 (2014-07-23)
@@ -562,13 +1350,13 @@ Release History
 ++++++++++++++++++
 
 - Added support for \n and \r characters in upload headers.
-- Added support for reading filenames from stdin when using the `ia delete` command.
+- Added support for reading filenames from stdin when using the ``ia delete`` command.
 
 0.6.8 (2014-07-11)
 ++++++++++++++++++
 
-- The delete `ia` subcommand is now verbose by default.
-- Added glob support to the delete `ia` subcommand (i.e. `ia delete --glob='*jpg'`).
+- The delete ``ia`` subcommand is now verbose by default.
+- Added glob support to the delete ``ia`` subcommand (i.e. ``ia delete --glob='*jpg'``).
 - Changed indexed metadata elements to clobber values instead of insert.
 - AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are now deprecated.
   IAS3_ACCESS_KEY and IAS3_SECRET_KEY must be used if setting IAS3

@@ -1,0 +1,5 @@
+# Revisions skipped by `git blame`. GitHub reads this file automatically.
+# Locally: git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# Reformat the codebase with ruff format (black -> ruff format, line length 88)
+fdb603d0fe7512516b60601149427a026fc7b92c

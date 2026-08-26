@@ -1,0 +1,234 @@
+[build-system]
+# hatchling >= 1.27 is required for PEP 639 (`license` as an SPDX expression
+# plus `license-files`); older versions reject project.license-files. Pinning a
+# floor matters for --no-build-isolation builds, where the backend comes from
+# the environment rather than being resolved fresh.
+requires = ["hatchling>=1.27", "hatch-vcs>=0.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "internetarchive"
+description = "A Python interface to archive.org."
+readme = "README.rst"
+requires-python = ">=3.10"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [{ name = "Jacob M. Johnson", email = "jake@archive.org" }]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "Natural Language :: English",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+]
+dependencies = [
+  "jsonpatch>=0.4",
+  "requests>=2.25.0,<3.0.0",
+  "tqdm>=4.0.0",
+  "urllib3>=1.26.0",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/jjjake/internetarchive"
+Documentation = "https://archive.org/developers/internetarchive/"
+Source = "https://github.com/jjjake/internetarchive"
+Changelog = "https://github.com/jjjake/internetarchive/blob/master/HISTORY.rst"
+
+[project.scripts]
+ia = "internetarchive.cli.ia:main"
+
+[project.optional-dependencies]
+dev = [
+  "mypy",
+  "pre-commit",
+  "pytest",
+  "twine",
+]
+docs = [
+  "alabaster==1.0.0",
+  "sphinx==8.1.3",
+  "sphinx-autodoc-typehints==3.0.0",
+  "typing-extensions",
+]
+test = [
+  "pytest==9.0.3",
+  "responses==0.26.1",
+  "ruff==0.14.1",
+]
+types = [
+  "tqdm-stubs>=0.2.0",
+  "types-colorama",
+  "types-jsonpatch>=0.1.0a0",
+  "types-pygments",
+  "types-requests>=2.25.0,<3.0.0",
+  "types-ujson>=4.2.0",
+  "types-urllib3>=1.26.0",
+]
+all = ["internetarchive[dev,test,types]"]
+
+# The version is derived from the git tag rather than stored in a file, so a
+# release is `git tag vX.Y.Z` and nothing else -- no version-bump PR, and no
+# way for the tag and the packaged version to disagree. Working from a
+# checkout between tags yields the next patch version with a .devN suffix.
+[tool.hatch.version]
+source = "vcs"
+raw-options = { local_scheme = "no-local-version" }
+
+# Written at build time and imported by internetarchive/__version__.py.
+# Not tracked in git -- see .gitignore.
+[tool.hatch.build.hooks.vcs]
+version-file = "internetarchive/_version.py"
+
+# Enumerated rather than `packages = ["internetarchive"]`, which takes the whole
+# directory and ships any untracked-but-not-gitignored subdirectory sitting in
+# it (stale package dirs left behind by other branches, for instance). This
+# mirrors what setup.cfg's explicit `packages` list used to constrain.
+# Selecting the `internetarchive` directory takes everything in it, including
+# any untracked-but-not-gitignored subdirectory that happens to be sitting
+# there (stale package dirs left behind by other branches, for instance).
+# Exclude subdirectories wholesale and add the one real subpackage back, so a
+# new subpackage has to be declared here to ship -- the constraint setup.cfg's
+# explicit `packages` list used to provide. Applies to both targets, since
+# `uv build` builds the wheel from the sdist.
+[tool.hatch.build]
+exclude = ["internetarchive/*/"]
+
+[tool.hatch.build.force-include]
+"internetarchive/cli" = "internetarchive/cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["internetarchive"]
+
+# only-include (not include): file selection otherwise falls back to VCS ignore
+# rules for anything not listed, which sweeps in whatever untracked directories
+# happen to sit in the working tree -- local virtualenvs, in particular.
+[tool.hatch.build.targets.sdist]
+only-include = [
+  "internetarchive",
+  "tests",
+  "AUTHORS.rst",
+  "HISTORY.rst",
+  "LICENSE",
+  "README.rst",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"
+markers = [
+  "network: tests that hit the live archive.org (deselect with -m 'not network')",
+]
+filterwarnings = [
+  # Fail on deprecations raised by our own code so they get fixed, not shipped.
+  "error::DeprecationWarning:internetarchive.*",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.format]
+# Preserve the project's historical style (black ran with skip-string-normalization):
+# keep existing quotes rather than normalizing to double.
+quote-style = "preserve"
+
+[tool.ruff.lint]
+select = [
+  "B",    # flake8-bugbear
+  "C4",   # flake8-comprehensions
+  "C90",  # McCabe cyclomatic complexity
+  "E",    # pycodestyle
+  "EXE",  # flake8-executable
+  "F",    # Pyflakes
+  "I",    # isort
+  "ICN",  # flake8-import-conventions
+  "INT",  # flake8-gettext
+  "ISC",  # flake8-implicit-str-concat
+  "PIE",  # flake8-pie
+  "PL",   # Pylint
+  "PT",   # flake8-pytest-style
+  "PYI",  # flake8-pyi
+  "RSE",  # flake8-raise
+  "RUF",  # Ruff-specific rules
+  "S",    # flake8-bandit
+  "SLF",  # flake8-self
+  "T10",  # flake8-debugger
+  "TID",  # flake8-tidy-imports
+  "UP",   # pyupgrade
+  "W",    # pycodestyle
+  "YTT",  # flake8-2020
+  # "A",    # flake8-builtins
+  # "ANN",  # flake8-annotations
+  # "ARG",  # flake8-unused-arguments
+  # "BLE",  # flake8-blind-except
+  # "COM",  # flake8-commas
+  # "D",    # pydocstyle
+  # "DJ",   # flake8-django
+  # "DTZ",  # flake8-datetimez
+  # "EM",   # flake8-errmsg
+  # "ERA",  # eradicate
+  # "FBT",  # flake8-boolean-trap
+  # "G",    # flake8-logging-format
+  # "INP",  # flake8-no-pep420
+  # "N",    # pep8-naming
+  # "NPY",  # NumPy-specific rules
+  # "PD",   # pandas-vet
+  # "PGH",  # pygrep-hooks
+  # "PTH",  # flake8-use-pathlib
+  # "Q",    # flake8-quotes
+  # "RET",  # flake8-return
+  # "SIM",  # flake8-simplify
+  # "T20",  # flake8-print
+  # "TCH",  # flake8-type-checking
+  # "TRY",  # tryceratops
+]
+ignore = [
+  "B904",
+  "E501",  # line length is enforced by `ruff format`; E501 only fires on lines it can't split
+  "F401",
+  "F841",
+  "PLC1901",
+  "PLR2004",
+  "PLR5501",
+  "PLW0603",
+  "PLW2901",
+  "RUF001",
+  "RUF005",
+  "S101",
+  "S103",
+  "S105",
+  "S106",
+  "S318",
+  "S324",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 33
+
+[tool.ruff.lint.pylint]
+max-args = 24
+max-branches = 33
+max-statements = 124
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E402"]
+"tests/*" = ["PT017", "S101"]
+"tests/test_catalog.py" = ["SLF001"]
+"tests/cli/test_ia_list.py" = ["E741"]
+"tests/test_api.py" = ["E712"]
+"tests/test_config.py" = ["PT011"]
+
+[tool.mypy]
+exclude = "^\\.git/|^__pycache__/|^docs/source/conf.py$|^old/|^build/|^dist/|\\.tox"
+python_version = "3.10"
+pretty = true
+scripts_are_modules = true
+show_error_codes = true
+show_error_context = true
+
+[tool.codespell]
+ignore-words-list = "alers"

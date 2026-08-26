@@ -1,0 +1,25 @@
+name: lint_python
+on: [pull_request, push]
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  lint_python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # hatch-vcs reads the version from git tags
+      - uses: actions/setup-python@v7
+        with:
+          python-version: 3.x
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - run: uv pip install --system .[all]
+      - run: ruff format --check --diff .  # See pyproject.toml for configuration
+      - run: ruff check --output-format=github  # See pyproject.toml for configuration
+      - run: uv pip install --system -r pex-requirements.txt -r tests/requirements.txt
+      - run: mypy .  # See pyproject.toml for configuration

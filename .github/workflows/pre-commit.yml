@@ -1,0 +1,27 @@
+# https://pre-commit.com
+# This GitHub Action assumes that the repo contains a valid .pre-commit-config.yaml file.
+name: pre-commit
+on:
+  pull_request:
+  push:
+    branches: [master]
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: 3.x
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - run: uv pip install --system pre-commit
+      - run: pre-commit --version
+      - run: pre-commit install
+      - run: pre-commit run --all-files
